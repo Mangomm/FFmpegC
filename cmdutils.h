@@ -299,27 +299,29 @@ typedef struct OptionGroupDef {
     /**
      * Option to be used as group separator. Can be NULL for groups which
      * are terminated by a non-option argument (e.g. ffmpeg output files)
+     * 选项用作组分隔符。对于由非选项参数终止的组(例如ffmpeg输出文件)，可以为NULL
      */
     const char *sep;
     /**
      * Option flags that must be set on each option that is
      * applied to this group
+     * 必须对应用于此组的每个选项设置的选项标志
      */
     int flags;
 } OptionGroupDef;
 
 typedef struct OptionGroup {
-    const OptionGroupDef *group_def;
-    const char *arg;
+    const OptionGroupDef *group_def;// 用来标记这个Option *opts结构里面的参数是属于输入还是输出文件.
+    const char *arg;				// 一般是文件名.
 
-    Option *opts;
-    int  nb_opts;
+    Option *opts;  					// 实际的参数选项.
+    int  nb_opts;                   // opts数组的大小.
 
-    AVDictionary *codec_opts;
-    AVDictionary *format_opts;
-    AVDictionary *resample_opts;
-    AVDictionary *sws_dict;
-    AVDictionary *swr_opts;
+    AVDictionary *codec_opts;       // 编解码选项
+    AVDictionary *format_opts;      // 解复用选项
+    AVDictionary *resample_opts;    // 重采样选项
+    AVDictionary *sws_dict;         // 视频转码参数选项，一般用于avfilter滤镜相关
+    AVDictionary *swr_opts;         // 音频相关配置选项
 } OptionGroup;
 
 /**
@@ -334,13 +336,13 @@ typedef struct OptionGroupList {
 } OptionGroupList;
 
 typedef struct OptionParseContext {
-    OptionGroup global_opts;
+    OptionGroup global_opts;            // 全局选项
 
-    OptionGroupList *groups;
-    int           nb_groups;
+    OptionGroupList *groups;            // 输入输出文件链表，ffmpeg固定是两个元素，一个存储输入，一个存储输出.
+    int           nb_groups;            // 链表大小
 
     /* parsing state */
-    OptionGroup cur_group;
+    OptionGroup cur_group;              // 临时用于操作的选项组.
 } OptionParseContext;
 
 /**

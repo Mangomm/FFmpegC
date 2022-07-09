@@ -101,13 +101,13 @@ typedef struct OptionsContext {
     int seek_timestamp;
     const char *format;
 
-    SpecifierOpt *codec_names;
+    SpecifierOpt *codec_names;                  //offset:40
     int        nb_codec_names;
     SpecifierOpt *audio_channels;
     int        nb_audio_channels;
     SpecifierOpt *audio_sample_rate;
     int        nb_audio_sample_rate;
-    SpecifierOpt *frame_rates;
+    SpecifierOpt *frame_rates;                  //offset:88
     int        nb_frame_rates;
     SpecifierOpt *frame_sizes;
     int        nb_frame_sizes;
@@ -115,9 +115,9 @@ typedef struct OptionsContext {
     int        nb_frame_pix_fmts;
 
     /* input options */
-    int64_t input_ts_offset;
+    int64_t input_ts_offset;                    //offset:136
     int loop;
-    int rate_emu;
+    int rate_emu;                               //offset:148 -re
     int accurate_seek;
     int thread_queue_size;
 
@@ -274,6 +274,7 @@ typedef struct OutputFilter {
     uint64_t channel_layout;
 
     // those are only set if no format is specified and the encoder gives us multiple options
+    // 只有在没有指定格式并且编码器提供多个选项的情况下才会设置这些选项
     int *formats;
     uint64_t *channel_layouts;
     int *sample_rates;
@@ -323,6 +324,7 @@ typedef struct InputStream {
 
     // when forcing constant input framerate through -r,
     // this contains the pts that will be given to the next decoded frame
+    // 当通过-r强制恒定的输入帧率时，这包含了将被赋予下一个解码帧的PTS
     int64_t cfr_next_pts;
 
     int64_t nb_samples; /* number of samples in the last decoded audio frame before looping */

@@ -84,6 +84,8 @@ enum show_muxdemuxers {
 
 void init_opts(void)
 {
+    // 一个与视频分辨率有关的参数.
+    // detail see https://www.csdn.net/tags/MtTaEgysNDE1MDc3LWJsb2cO0O0O.html.
     av_dict_set(&sws_dict, "flags", "bicubic", 0);
 }
 
@@ -141,19 +143,37 @@ void exit_program(int ret)
     exit(ret);
 }
 
+/**
+ * @brief 将字符串类型的数字转成对应的数值类型.
+ * @param context 选项的key
+ * @param numstr 选项的val
+ * @param type 选项val数值的类型
+ * @param min 选项val数值的类型的最小值
+ * @param max 选项val数值的类型的最大值
+ * @return 成功返回解析后的数值,失败退出程序.
+*/
 double parse_number_or_die(const char *context, const char *numstr, int type,
                            double min, double max)
 {
     char *tail;
     const char *error;
+    /*
+        av_strtod函数：在numstr中解析字符串并返回其值为双精度值。如果字符串为空，只包含空白，或不包含具有浮点数预期语法的初始子字符串，则不执行转换。
+        在本例中，返回值为零，在tail中返回的值为numstr的值。
+        1：param numstr：是一个表示数字的字符串，可能包含一个国际系统的数字后缀，例如'K'， 'M'， 'G'。
+        如果在后缀后面加上'i'，则使用2的幂而不是10的幂。后缀“B”将该值乘以8，可以添加到另一个后缀之后，
+        也可以单独使用。这允许使用'KB'， 'MiB'， 'G'和'B'作为后缀。
+        2：param tail：如果非null将指向字符的指针放在最后一个解析字符之后。
+        // 具体可以参考这篇类似的文章：https://blog.csdn.net/qianshanxue11/article/details/50728442
+    */
     double d = av_strtod(numstr, &tail);
-    if (*tail)
+    if (*tail)// numstr出现非法字符？
         error = "Expected number for %s but found: %s\n";
-    else if (d < min || d > max)
+    else if (d < min || d > max)// 越界
         error = "The value for %s was %s which is not within %f - %f\n";
-    else if (type == OPT_INT64 && (int64_t)d != d)
+    else if (type == OPT_INT64 && (int64_t)d != d)// 数字是64位的int，但是与doblue不匹配，同样说明越界.
         error = "Expected int64 for %s but found %s\n";
-    else if (type == OPT_INT && (int)d != d)
+    else if (type == OPT_INT && (int)d != d)// 数字是32位的int，但是与doblue不匹配，同样说明越界.
         error = "Expected int for %s but found %s\n";
     else
         return d;
@@ -215,9 +235,17 @@ void show_help_children(const AVClass *class, int flags)
         show_help_children(child, flags);
 }
 
+/**
+ * @brief 判断name是否在全局静态数组po.
+ * @param po 指向全局静态数组options[].
+ * @param name 用户传进key，不带"-"
+ * @return 找到返回对应OptionDef,否则返回NULL.
+*/
 static const OptionDef *find_option(const OptionDef *po, const char *name)
 {
-    const char *p = strchr(name, ':');
+    // 1. 判断name是否有":".例如profile:v
+    // 如果有":",它只会判断":"之前的长度，例如profile:v只会匹配profile这len=7的长度.
+    const char *p = strchr(name, ':');// 若找到该子串,返回从该子串开始的后面所有字符串,包括该下标.
     int len = p ? p - name : strlen(name);
 
     while (po->name) {
@@ -244,6 +272,7 @@ static int win32_argc = 0;
  * @param argc_ptr Arguments number (including executable)
  * @param argv_ptr Arguments list.
  */
+// 宽字节转成多字节
 static void prepare_app_arguments(int *argc_ptr, char ***argv_ptr)
 {
     char *argstr_flat;
@@ -256,11 +285,15 @@ static void prepare_app_arguments(int *argc_ptr, char ***argv_ptr)
         return;
     }
 
+    // 1. CommandLineToArgvW是获取命令行的参数以及个数，等价于main中的argc、argv.
     win32_argc = 0;
     argv_w = CommandLineToArgvW(GetCommandLineW(), &win32_argc);
     if (win32_argc <= 0 || !argv_w)
         return;
+    //printf("argc: %d. argv: %s\n", win32_argc, argv_w);
 
+    // 2. 获取命令行所有参数的总字节大小.
+    // 因为这里获取到的argv是宽字节，所以需要用WideCharToMultiByte获取字节数.
     /* determine the UTF-8 buffer size (including NULL-termination symbols) */
     for (i = 0; i < win32_argc; i++)
         buffsize += WideCharToMultiByte(CP_UTF8, 0, argv_w[i], -1,
@@ -273,6 +306,7 @@ static void prepare_app_arguments(int *argc_ptr, char ***argv_ptr)
         return;
     }
 
+    // 3. 将宽字节转换，保存到argstr_flat中
     for (i = 0; i < win32_argc; i++) {
         win32_argv_utf8[i] = &argstr_flat[offset];
         offset += WideCharToMultiByte(CP_UTF8, 0, argv_w[i], -1,
@@ -292,6 +326,13 @@ static inline void prepare_app_arguments(int *argc_ptr, char ***argv_ptr)
 }
 #endif /* HAVE_COMMANDLINETOARGVW */
 
+/**
+ * @brief
+ * @param optctx
+ * @param po ffmpeg官方定义的options数组里面的元素之一.
+ * @param opt 选项的key
+ * @param arg 选项的val
+*/
 static int write_option(void *optctx, const OptionDef *po, const char *opt,
                         const char *arg)
 {
@@ -418,9 +459,12 @@ int parse_optgroup(void *optctx, OptionGroup *g)
     av_log(NULL, AV_LOG_DEBUG, "Parsing a group of options: %s %s.\n",
            g->group_def->name, g->arg);
 
+    // 1. 遍历该选项组(一般指一个文件)包含的选项.
     for (i = 0; i < g->nb_opts; i++) {
-        Option *o = &g->opts[i];
+        Option *o = &g->opts[i];// 获取该选项组的一个选项.
 
+        // 2. 检测用户输入参数的语法是否有误.
+        // g->group_def->flags代表按语法顺序去解析用户输入的选项时得到的flags，而o->opt->flags就是官方的flags
         if (g->group_def->flags &&
             !(g->group_def->flags & o->opt->flags)) {
             av_log(NULL, AV_LOG_ERROR, "Option %s (%s) cannot be applied to "
@@ -434,6 +478,7 @@ int parse_optgroup(void *optctx, OptionGroup *g)
         av_log(NULL, AV_LOG_DEBUG, "Applying option %s (%s) with argument %s.\n",
                o->key, o->opt->help, o->val);
 
+        // 3. 该选项无误则写入optctx,正常选项时optctx是OptionsContext,全局选项时是NULL.
         ret = write_option(optctx, o->opt, o->key, o->val);
         if (ret < 0)
             return ret;
@@ -535,6 +580,18 @@ void parse_loglevel(int argc, char **argv, const OptionDef *options)
 static const AVOption *opt_find(void *obj, const char *name, const char *unit,
                             int opt_flags, int search_flags)
 {
+    /*
+     av_opt_find函数:
+     在对象中查找一个选项。只考虑设置了所有指定标志的选项。
+     obj:指向一个第一个元素是AVClass指针的struct的指针。另外，如果设置了AV_OPT_SEARCH_FAKE_OBJ搜索标志，则指向AVClass的双指针。
+     name:要查找的选项的名称.
+     unit:当搜索命名常量时，它所属的单位名称。
+     opt_flags:只查找所有指定标志设置的选项(AV_OPT_FLAG)。
+     search_flags:AV_OPT_SEARCH_*的组合。
+
+     return:返回一个指向找到的选项的指针，如果没有找到，则返回NULL。
+     note:带有AV_OPT_SEARCH_CHILDREN标志的选项不能直接使用av_opt_set()设置。使用带有AVDictionary选项的特殊调用(例如avformat_open_input())来设置带有该标志的选项。
+    */
     const AVOption *o = av_opt_find(obj, name, unit, opt_flags, search_flags);
     if(o && !o->flags)
         return NULL;
@@ -546,7 +603,7 @@ int opt_default(void *optctx, const char *opt, const char *arg)
 {
     const AVOption *o;
     int consumed = 0;
-    char opt_stripped[128];
+    char opt_stripped[128];// 临时数组
     const char *p;
     const AVClass *cc = avcodec_get_class(), *fc = avformat_get_class();
 #if CONFIG_AVRESAMPLE
@@ -562,10 +619,24 @@ int opt_default(void *optctx, const char *opt, const char *arg)
     if (!strcmp(opt, "debug") || !strcmp(opt, "fdebug"))
         av_log_set_level(AV_LOG_DEBUG);
 
+    // 判断opt选项是否带":",若带p则指向":"下标;若不带p则指向opt的末尾.
     if (!(p = strchr(opt, ':')))
         p = opt + strlen(opt);
+
+    // 将opt的内容拷贝至opt_stripped临时数组.p - opt + 1，加1是确保opt后面的结束符也能被拷贝。
+    // 例如opt=level参数.
     av_strlcpy(opt_stripped, opt, FFMIN(sizeof(opt_stripped), p - opt + 1));
 
+    // 1. 查找该选项是否属于编解码器,若是则设置到codec_opts.不是则继续往下判断.
+    // 例如-re -stream_loop -1 -an  -i aGanZhengChuan-av.mp4 -vcodec libx264 -profile:v main -level 3.1
+    // -preset veryfast -tune zerolatency -b:v 1000K -maxrate 1000K -minrate 1000K -bufsize 2000K -s 704x576 -r 25
+    // -keyint_min 50 -g 50 -sc_threshold 0 -an -shortest -f flv rtmp://192.168.1.118:1935/live/tyy
+    // 这几个选项都是编解码器的选项：level preset tune maxrate、minrate、bufsize、keyint_min、g、sc_threshold.
+    // 其中因为我们这里使用的编解码器是libx264，所以level preset tune所以可以去libavcodec/libx264.c文件找到对应的static const AVOption options[]定义
+    // 而maxrate、minrate、bufsize、keyint_min、g、sc_threshold在libavcodec/options_table.h
+    const AVOption * tyy1 = opt_find(&cc, opt_stripped, NULL, 0, AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ);// 直接判断该选项
+    const AVOption * tyy2 = (opt[0] == 'v' || opt[0] == 'a' || opt[0] == 's');// 判断是否是视频、音频、字幕过滤器？
+    const AVOption * tyy3 = o = opt_find(&cc, opt + 1, NULL, 0, AV_OPT_SEARCH_FAKE_OBJ);// 跳一个字符是什么意思？
     if ((o = opt_find(&cc, opt_stripped, NULL, 0,
                          AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ)) ||
         ((opt[0] == 'v' || opt[0] == 'a' || opt[0] == 's') &&
@@ -573,6 +644,8 @@ int opt_default(void *optctx, const char *opt, const char *arg)
         av_dict_set(&codec_opts, opt, arg, FLAGS);
         consumed = 1;
     }
+
+    // 2. 查找该选项是否属于解复用器.
     if ((o = opt_find(&fc, opt, NULL, 0,
                          AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ))) {
         av_dict_set(&format_opts, opt, arg, FLAGS);
@@ -580,6 +653,8 @@ int opt_default(void *optctx, const char *opt, const char *arg)
             av_log(NULL, AV_LOG_VERBOSE, "Routing option %s to both codec and muxer layer\n", opt);
         consumed = 1;
     }
+
+    // 3. 查找该选项是否属于视频转码参数选项.
 #if CONFIG_SWSCALE
     if (!consumed && (o = opt_find(&sc, opt, NULL, 0,
                          AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ))) {
@@ -607,6 +682,8 @@ int opt_default(void *optctx, const char *opt, const char *arg)
         consumed = 1;
     }
 #endif
+
+    // 4. 查找该选项是否属于重采样选项？
 #if CONFIG_SWRESAMPLE
     if (!consumed && (o=opt_find(&swr_class, opt, NULL, 0,
                                     AV_OPT_SEARCH_CHILDREN | AV_OPT_SEARCH_FAKE_OBJ))) {
@@ -639,11 +716,19 @@ int opt_default(void *optctx, const char *opt, const char *arg)
  *
  * @return index of the group definition that matched or -1 if none
  */
+/**
+ * @brief 返回输入文件的下标,如果不是则返回-1.
+ * @param groups
+ * @param nb_groups 静态数组的大小，本程序固定是2
+ * @param opt 用户传进的key去掉"-"后的字符串,例如-re去掉"-",opt就是re字符串.
+ * @return 返回输入文件的下标,如果不是则返回-1.
+*/
 static int match_group_separator(const OptionGroupDef *groups, int nb_groups,
                                  const char *opt)
 {
     int i;
 
+    // 这里应该只是找输入文件在argv数组的下标.因为输出文件的sep是空，在这里会返回-1.
     for (i = 0; i < nb_groups; i++) {
         const OptionGroupDef *p = &groups[i];
         if (p->sep && !strcmp(p->sep, opt))
@@ -659,18 +744,26 @@ static int match_group_separator(const OptionGroupDef *groups, int nb_groups,
  * @param group_idx which group definition should this group belong to
  * @param arg argument of the group delimiting option
  */
+/**
+ * @brief 扫描到i选项，说明已经处理完一个输入文件的参数，那么在数组OptionGroup *groups中新建一个OptionGroup *g元素用于保存这个输入文件的参数.
+ * @param octx
+ * @param group_idx 0或者1，0:输入文件,1:输出文件.
+ * @param arg 文件名.本程序指的文件名可以是文件或者实时流.
+ */
 static void finish_group(OptionParseContext *octx, int group_idx,
                          const char *arg)
 {
     OptionGroupList *l = &octx->groups[group_idx];
     OptionGroup *g;
 
+    // 1. 往OptionGroupList中的OptionGroup数组增加一个元素.
     GROW_ARRAY(l->groups, l->nb_groups);
-    g = &l->groups[l->nb_groups - 1];
+    g = &l->groups[l->nb_groups - 1];// 获取新增的元素,用于临时操作.
 
-    *g             = octx->cur_group;
-    g->arg         = arg;
-    g->group_def   = l->group_def;
+    // 2. 赋值.
+    *g             = octx->cur_group;// 这里实际赋值Option *opts以及int  nb_opts,因为临时选项cur_group在分割时只得到这两个内容
+    g->arg         = arg;            // 文件名
+    g->group_def   = l->group_def;   // input url或者是output url的描述
     g->sws_dict    = sws_dict;
     g->swr_opts    = swr_opts;
     g->codec_opts  = codec_opts;
@@ -684,43 +777,69 @@ static void finish_group(OptionParseContext *octx, int group_idx,
     swr_opts    = NULL;
     init_opts();
 
+    // 3. 清空本次的cur_group.
     memset(&octx->cur_group, 0, sizeof(octx->cur_group));
 }
 
 /*
  * Add an option instance to currently parsed group.
  */
+/**
+ * @brief 往全局选项或者临时选项的Option数组新增一个元素.
+ * @param octx
+ * @param opt ffmpeg官方定义的元素说明,在全局静态数组options中.
+ * @param key 用户传进的key,不带"-"
+ * @param val 用户或者ffmpeg添加的值
+ */
 static void add_opt(OptionParseContext *octx, const OptionDef *opt,
                     const char *key, const char *val)
 {
+    // 1. 判断该选项opt是否是全局,是g则指向全局选项,不是则指向临时选项.
+    // 判断依据：只要opt->flags带有OPT_PERFILE或者OPT_SPEC或者OPT_OFFSET其中一个标志位，则说明不是全局.
+    // 注：ffmpeg设置OPT_PERFILE、OPT_SPEC、OPT_OFFSET这些宏时，刚好是按照二进制的每一个bit去设计的，一个宏只会占用二进制的一个bit.共定义了19个宏.
+    // 例如re参数,带有OPT_OFFSET,运算：1110 0000 0000 0000 & 0100 0000 0000 0000 = 0100 0000 0000 0000，取反后global=0,说明是非全局参数.
+    int tyyb = (OPT_PERFILE | OPT_SPEC | OPT_OFFSET);
+    int tyyt = opt->flags & tyyb;
     int global = !(opt->flags & (OPT_PERFILE | OPT_SPEC | OPT_OFFSET));
     OptionGroup *g = global ? &octx->global_opts : &octx->cur_group;
 
+    // 2. 往全局或者临时选项内的Option数组新增一个元素，g->nb_opts自动加1.
+    // 然后赋值，opt是ffmpeg官方定义的元素说明.key是用户的key，val是用户或者ffmpeg添加的值.
     GROW_ARRAY(g->opts, g->nb_opts);
     g->opts[g->nb_opts - 1].opt = opt;
     g->opts[g->nb_opts - 1].key = key;
     g->opts[g->nb_opts - 1].val = val;
 }
 
+/**
+ * @brief 初始化octx
+ * @param octx 参数上下文
+ * @param groups 全局静态数组groups.
+ * @param nb_groups 全局静态数组groups的大小，本版本为2个.
+*/
 static void init_parse_context(OptionParseContext *octx,
                                const OptionGroupDef *groups, int nb_groups)
 {
     static const OptionGroupDef global_group = { "global" };
     int i;
 
+    // 1. octx清0.
     memset(octx, 0, sizeof(*octx));
 
+    // 2. 为输入输出文件开辟空间,所以OptionGroupList就代表存储输入输出文件的链表.
     octx->nb_groups = nb_groups;
     octx->groups    = av_mallocz_array(octx->nb_groups, sizeof(*octx->groups));
     if (!octx->groups)
         exit_program(1);
 
+    // 3. 给输入、输出、全局选项赋予OptionGroupDef值.
     for (i = 0; i < octx->nb_groups; i++)
-        octx->groups[i].group_def = &groups[i];
+        octx->groups[i].group_def = &groups[i];// 指向对应的def,下标0:输出,1:输入.
 
-    octx->global_opts.group_def = &global_group;
+    octx->global_opts.group_def = &global_group;// 全局选项的def,所以上面定义global_group使用了static
     octx->global_opts.arg       = "";
 
+    // 4. 设置视频转码参数选项.
     init_opts();
 }
 
@@ -750,6 +869,17 @@ void uninit_parse_context(OptionParseContext *octx)
     uninit_opts();
 }
 
+/**
+ * @breif 将用户输入的命令行参数进行分割.主要分为四大类，输入文件、输出文件，正常选项，AVoptions选项.
+ *          如果是AVoptions选项，会直接先设置到对应的AVDictionary字典.
+ * @param octx
+ * @param argc 用户输入的参数个数，包含可执行程序本身.
+ * @param argv 参数数组，包含可执行程序本身.
+ * @param options ffmpeg定义的全局静态options数组.
+ * @param groups ffmpeg定义的全局静态groups数组,只有输入输出文件两个元素.
+ * @param nb_groups groups数组的个数,固定为2.
+ * @return >= 成功; <0 失败
+*/
 int split_commandline(OptionParseContext *octx, int argc, char *argv[],
                       const OptionDef *options,
                       const OptionGroupDef *groups, int nb_groups)
@@ -757,29 +887,36 @@ int split_commandline(OptionParseContext *octx, int argc, char *argv[],
     int optindex = 1;
     int dashdash = -2;
 
+    // 1. 将宽字节转成多字节.
     /* perform system-dependent conversions for arguments list */
     prepare_app_arguments(&argc, &argv);
 
+    // 2. 初始化octx
     init_parse_context(octx, groups, nb_groups);
     av_log(NULL, AV_LOG_DEBUG, "Splitting the commandline.\n");
 
-    while (optindex < argc) {
+    while (optindex < argc) {// 这里说明执行的命令至少要有一个参数才能进来.例如ffmpeg.exe表示只有程序名而无参数,这里不会进来
         const char *opt = argv[optindex++], *arg;
         const OptionDef *po;
         int ret;
 
         av_log(NULL, AV_LOG_DEBUG, "Reading option '%s' ...", opt);
 
+        // 遇到--选项跳过处理?
         if (opt[0] == '-' && opt[1] == '-' && !opt[2]) {
             dashdash = optindex;
             continue;
         }
+
+        // 3. 处理输出文件
         /* unnamed group separators, e.g. output filename */
         if (opt[0] != '-' || !opt[1] || dashdash+1 == optindex) {
             finish_group(octx, 0, opt);
             av_log(NULL, AV_LOG_DEBUG, " matched as %s.\n", groups[0].name);
             continue;
         }
+
+        // 来到这里说明key是只带一个"-"的key，例如"-re"，那么我们跳过"-",执行opt++后，此时opt的值为"re"
         opt++;
 
 #define GET_ARG(arg)                                                           \
@@ -791,15 +928,19 @@ do {                                                                           \
     }                                                                          \
 } while (0)
 
+        // 4. 判断是否是输入文件的key，即i选项.
         /* named group separators, e.g. -i */
         if ((ret = match_group_separator(groups, nb_groups, opt)) >= 0) {
             GET_ARG(arg);
-            finish_group(octx, ret, arg);
+            finish_group(octx, ret, arg);// 完成一个组的参数处理.
             av_log(NULL, AV_LOG_DEBUG, " matched as %s with argument '%s'.\n",
                    groups[ret].name, arg);
             continue;
         }
 
+
+        // 5. 从ffmpeg定义options数组中获取对应的OptionDef元素,若找到说明是正常选项，
+        //      则将其放进临时选项cur_group，待找到输入或者输出文件时，再放进参数上下文octx.
         /* normal options */
         po = find_option(options, opt);
         if (po->name) {
@@ -807,9 +948,9 @@ do {                                                                           \
                 /* optional argument, e.g. -h */
                 arg = argv[optindex++];
             } else if (po->flags & HAS_ARG) {
-                GET_ARG(arg);
+                GET_ARG(arg);// key带val的，走这个流程
             } else {
-                arg = "1";
+                arg = "1";// key不带val的，走这个流程
             }
 
             add_opt(octx, po, opt, arg);
@@ -818,6 +959,7 @@ do {                                                                           \
             continue;
         }
 
+        // 6. 如果是AVOptions(解复用、编解码器、重采样、视频sws相关选项)，则会直接设置到对应的AVDictionary字典.
         /* AVOptions */
         if (argv[optindex]) {
             ret = opt_default(NULL, opt, argv[optindex]);
@@ -833,6 +975,7 @@ do {                                                                           \
             }
         }
 
+        // 7. 这里应该布尔相关的,暂未分析.
         /* boolean -nofoo options */
         if (opt[0] == 'n' && opt[1] == 'o' &&
             (po = find_option(options, opt + 2)) &&
@@ -845,12 +988,15 @@ do {                                                                           \
 
         av_log(NULL, AV_LOG_ERROR, "Unrecognized option '%s'.\n", opt);
         return AVERROR_OPTION_NOT_FOUND;
-    }
+    }//<== while (optindex < argc) end ==>
 
+    // 判断输出文件后面是否有拖尾选项,有则报警告.
+    // 例如ffmpeg -i input.mp4 output.mp4 -an，那么octx->cur_group.nb_opts=1,说明有一个拖尾选项，即-an
     if (octx->cur_group.nb_opts || codec_opts || format_opts || resample_opts)
         av_log(NULL, AV_LOG_WARNING, "Trailing options were found on the "
                "commandline.\n");
 
+    // 来到这里表示完成命令行分割.
     av_log(NULL, AV_LOG_DEBUG, "Finished splitting the commandline.\n");
 
     return 0;

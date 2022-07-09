@@ -132,6 +132,7 @@ static void uninit_options(OptionsContext *o)
     while (po->name) {
         void *dst = (uint8_t*)o + po->u.off;
 
+        // 1. 保存在SpecifierOpt结构的，需要被释放
         if (po->flags & OPT_SPEC) {
             SpecifierOpt **so = dst;
             int i, *count = (int*)(so + 1);
@@ -143,6 +144,7 @@ static void uninit_options(OptionsContext *o)
             av_freep(so);
             *count = 0;
         } else if (po->flags & OPT_OFFSET && po->flags & OPT_STRING)
+            // 2. 具有OPT_OFFSET标志且是字符串，同样需要被释放
             av_freep(dst);
         po++;
     }
@@ -3256,18 +3258,24 @@ static const OptionGroupDef groups[] = {
     [GROUP_INFILE]  = { "input url",   "i",  OPT_INPUT },
 };
 
+// ret = open_files(&octx.groups[GROUP_INFILE], "input", open_input_file);
 static int open_files(OptionGroupList *l, const char *inout,
                       int (*open_file)(OptionsContext*, const char*))
 {
     int i, ret;
 
+    /*1.经过对命令行的分析将输入文件链表放到了l中，在此逐一对输入文件进行处理*/
+    /*l->nb_groups指输入文件个数*/
     for (i = 0; i < l->nb_groups; i++) {
-        OptionGroup *g = &l->groups[i];
+        OptionGroup *g = &l->groups[i];// 拿到一个输入文件进行处理.
         OptionsContext o;
 
+        /*2.对OptionsContext 中的变量做默认设置，这个结构体很重要，它和ffmpeg_opt.c中定义的const OptionDef options[]相对应。
+         * 其中设置的偏移量就是针对这个结构体*/
         init_options(&o);
         o.g = g;
 
+        /*3.将g中存的，从命令行中获取的针对这个输入文件的参数放到o中*/
         ret = parse_optgroup(&o, g);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error parsing options for %s file "
@@ -3298,6 +3306,7 @@ int ffmpeg_parse_options(int argc, char **argv)
 
     memset(&octx, 0, sizeof(octx));
 
+    // 1. 分割命令行
     /* split the commandline into an internal representation */
     ret = split_commandline(&octx, argc, argv, options, groups,
                             FF_ARRAY_ELEMS(groups));
@@ -3306,6 +3315,7 @@ int ffmpeg_parse_options(int argc, char **argv)
         goto fail;
     }
 
+    // 2. 应用全局选项
     /* apply global options */
     ret = parse_optgroup(NULL, &octx.global_opts);
     if (ret < 0) {
@@ -3313,9 +3323,11 @@ int ffmpeg_parse_options(int argc, char **argv)
         goto fail;
     }
 
+    // 3. 相关信号注册.这里不深入研究.
     /* configure terminal and setup signal handlers */
     term_init();
 
+    // 4.
     /* open input files */
     ret = open_files(&octx.groups[GROUP_INFILE], "input", open_input_file);
     if (ret < 0) {
@@ -3365,6 +3377,8 @@ static int opt_progress(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
+// offsetof是一个C函数:返回字节对齐后，成员在结构体中的偏移量.
+// detail see https://blog.csdn.net/weixin_45275802/article/details/113528695
 #define OFFSET(x) offsetof(OptionsContext, x)
 const OptionDef options[] = {
     /* main options */
