@@ -4870,6 +4870,52 @@ int main(int argc, char **argv)
 
     show_banner(argc, argv, options);
 
+//    struct TestSpecifierOpt {
+//        const char* c;
+//    };
+//    struct TestOptionsContext {
+//        struct TestSpecifierOpt *t;
+//        int        nb_t;
+//    };
+
+//    struct TestOptionsContext o;
+//    void *dst = o.t;// 获取结构体成员偏移地址错误写法，获取一个没问题，若通过dst再获取其它成员就是错误写法，
+//    int *dstcount;
+//    {
+//        struct TestSpecifierOpt **so = dst;
+//        dstcount = (int*)(so + 1);
+//        *dstcount=1000;
+//        printf("dstcount: %d, o.nv_t: %d\n", *dstcount, (int)o.nb_t);
+//    }
+    OptionsContext o;
+    {
+        memset(&o, 0, sizeof(o));
+
+        o.stop_time = INT64_MAX;
+        o.mux_max_delay  = 0.7;
+        o.start_time     = AV_NOPTS_VALUE;
+        o.start_time_eof = AV_NOPTS_VALUE;
+        o.recording_time = INT64_MAX;
+        o.limit_filesize = UINT64_MAX;
+        o.chapters_input_file = INT_MAX;
+        o.accurate_seek  = 1;
+    }
+    void *dst = (uint8_t *)&o + offsetof(OptionsContext, codec_names);// 正确写法
+    printf("dst: %#X, o.codec_names: %#X, &o.codec_names: %#X",
+           dst, o.codec_names, &o.codec_names);//验证得到的dst是该成员指针的地址还是该成员指针的值.
+    // 结果：dst: 0X6CFA58, o.codec_names: 0, &o.codec_names: 0X6CFA58，说明通过偏移获取结构体成员，得到的是该成员指针的地址
+    int *dstcount;
+    {
+        SpecifierOpt **so = dst;
+        dstcount = (int*)(so + 1);// 指针加1等价于该地址加上sizeof该类型的字节数，因为指针加1时仅由本身类型决定
+        // 所以上面的语句等价于：dstcount = (uint8_t *)dst + sizeof (SpecifierOpt *);
+        // 具体看https://blog.csdn.net/qq_39505298/article/details/76248679
+
+        //*so = grow_array(*so, sizeof (**so), dstcount, *dstcount+1);
+        *dstcount=1000;
+        printf("dstcount: %d, o.nb_codec_names: %d\n", *dstcount, o.nb_codec_names);
+    }
+
     /* parse options and open all input/output files */
     ret = ffmpeg_parse_options(argc, argv);
     if (ret < 0)

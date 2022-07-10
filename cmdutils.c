@@ -327,7 +327,7 @@ static inline void prepare_app_arguments(int *argc_ptr, char ***argv_ptr)
 #endif /* HAVE_COMMANDLINETOARGVW */
 
 /**
- * @brief
+ * @brief 将保存在OptionParseContext的参数写进OptionsContext o(即参数optctx)变量中.
  * @param optctx
  * @param po ffmpeg官方定义的options数组里面的元素之一.
  * @param opt 选项的key
@@ -338,32 +338,56 @@ static int write_option(void *optctx, const OptionDef *po, const char *opt,
 {
     /* new-style options contain an offset into optctx, old-style address of
      * a global var*/
+    // 1. 获取OptionsContext o(即optctx)成员中的偏移地址或者回调函数，
+    // 当我们操作该指针时，即可保存对应的值到OptionsContext中。
     void *dst = po->flags & (OPT_OFFSET | OPT_SPEC) ?
-                (uint8_t *)optctx + po->u.off : po->u.dst_ptr;
-    int *dstcount;
+                (uint8_t *)optctx + po->u.off : po->u.dst_ptr;//得到该成员的内存地址，例如是SpecifierOpt *codec_names，返回的是&codec_names
+    int *dstcount;//如果数据是SpecifierOpt *类型，对应的存入链表成员个数的变量地址,例如int nb_codec_names，返回的是&nb_codec_names
 
+    // 2. 判断得到的成员dts的类型.即dst在OptionsContext中对应为SpecifierOpt类型的变量
+    // 看这里必须printf打印出来，因为qt debug时可能显示的值不正确.
     if (po->flags & OPT_SPEC) {
-        SpecifierOpt **so = dst;
-        char *p = strchr(opt, ':');
+        SpecifierOpt **so = dst;// 用临时的二级指针变量指向dst，方便操作，且因为dst是void*，不方便直接操作内部成员.
+                                // 注：dst是指向成员的内存地址，所以so此时也是指向成员地址，这点非常重要.
+        // 注意：这里打印很重要，因为qt debug时看到so指向0x0，这是不正确的，打印出来so不是0x0，我被qt的debug害得好惨.
+        printf("write_option so addr: %#X, *so addr: %#X, dst: %#X\n",
+               so, *so, dst);// 猜想:此时so、dst指向一样，都是指向成员指针的内存地址，而*so则是成员指针的值.猜想正确
+                             // 以codec_names为例，so=dst=&codec_names，*so=codec_names。
+
+        char *p = strchr(opt, ':');// 查找是否有子串':'，有则返回该下标开始及后面的字符串
         char *str;
 
+        /*利用dst的偏移地址获取下一个成员的偏移地址，用于记录dst的数量.
+         * 注意，ffmpeg的OptionsContext设计，只有带有SpecifierOpt*类型的变量，下一个成员必是int nb_xxx的成员.
+        例如：
+        SpecifierOpt *codec_names;
+        int        nb_codec_names;*/
         dstcount = (int *)(so + 1);
-        *so = grow_array(*so, sizeof(**so), dstcount, *dstcount + 1);
+        printf("write_option so addr: %#X, *so addr: %#X, dst: %#X\n",
+               so, *so, dst);
+        *so = grow_array(*so, sizeof(**so), dstcount, *dstcount + 1);// SpecifierOpt数组扩容，每次加1个元素的大小.
+        printf("write_option so addr: %#X, *so addr: %#X, so[*dstcount-1] addr: %#X, dst: %#X\n",
+               so, *so, so[*dstcount-1], dst);
+
+        // 将冒号后面的字符串存入此，p一般为:v :a :s :d，那么str就变成v a s d，av_strdup会自动开辟对应内存
         str = av_strdup(p ? p + 1 : "");
         if (!str)
             return AVERROR(ENOMEM);
-        (*so)[*dstcount - 1].specifier = str;
-        dst = &(*so)[*dstcount - 1].u;
+
+        (*so)[*dstcount - 1].specifier = str;// 将str赋值给 SpecifierOpt数组末尾元素的specifier，即新开辟的SpecifierOpt元素
+        dst = &(*so)[*dstcount - 1].u;// dst指向新开辟元素的共用体u的地址，方便后面进行使用该共用体保存对应的值
     }
 
+    // 3. 到这一步，我们就发现dst指向u的内存地址的作用了，u是实际存放对应值的内容，可以存放数值型以及字符串，因为u是一个共用体.
+    // 3.1 如果key是字符串类型.
     if (po->flags & OPT_STRING) {
         char *str;
-        str = av_strdup(arg);
-        av_freep(dst);
+        str = av_strdup(arg);// 为val值开辟内存
+        av_freep(dst);//释放*dst的内存，实际上SpecifierOpt的成员specifier以及u都是没有分配内存的，需要自己分配，不过av_freep释放NULL是没问题的.
         if (!str)
             return AVERROR(ENOMEM);
         *(char **)dst = str;
-    } else if (po->flags & OPT_BOOL || po->flags & OPT_INT) {
+    } else if (po->flags & OPT_BOOL || po->flags & OPT_INT) {// 布尔以及下面的数值型都是使用parse_number_or_die处理，比较简单
         *(int *)dst = parse_number_or_die(opt, arg, OPT_INT64, INT_MIN, INT_MAX);
     } else if (po->flags & OPT_INT64) {
         *(int64_t *)dst = parse_number_or_die(opt, arg, OPT_INT64, INT64_MIN, INT64_MAX);
@@ -373,7 +397,7 @@ static int write_option(void *optctx, const OptionDef *po, const char *opt,
         *(float *)dst = parse_number_or_die(opt, arg, OPT_FLOAT, -INFINITY, INFINITY);
     } else if (po->flags & OPT_DOUBLE) {
         *(double *)dst = parse_number_or_die(opt, arg, OPT_DOUBLE, -INFINITY, INFINITY);
-    } else if (po->u.func_arg) {
+    } else if (po->u.func_arg) {// 回调参数处理
         int ret = po->u.func_arg(optctx, opt, arg);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR,
@@ -2299,20 +2323,39 @@ AVDictionary **setup_find_stream_info_opts(AVFormatContext *s,
     return opts;
 }
 
+/**
+ * @brief
+ * @param array 要扩充的数组
+ * @param elem_size 该数组单个元素的字节大小
+ * @param size array数组中已有的元素个数，不过一般传0，调用完成后得到array的总元素个数.
+ * @param new_size 新数组中元素的总个数，包含原有size个元素
+ * @return 成功返回新开辟的数组首地址，并且总元素个数通过传出参数size传出.
+ *          失败看av_realloc_array说明.
+*/
 void *grow_array(void *array, int elem_size, int *size, int new_size)
 {
+    // 1. 判断要开辟的元素是否超过int的最大元素开辟个数.
+    // INT_MAX是最大开辟字节数，elem_size是单个元素占的字节数，故除以后得到最大开辟元素个数.
     if (new_size >= INT_MAX / elem_size) {
         av_log(NULL, AV_LOG_ERROR, "Array too big.\n");
         exit_program(1);
     }
+
+    // 2. 若要开辟新内存的大小，小于原来内存的大小，则不做处理，返回原来的数组.
     if (*size < new_size) {
+        /*
+         * av_realloc_array: Allocate, reallocate, or free an array.
+         * 具体看该函数说明即可.
+        */
         uint8_t *tmp = av_realloc_array(array, new_size, elem_size);
         if (!tmp) {
             av_log(NULL, AV_LOG_ERROR, "Could not alloc buffer.\n");
             exit_program(1);
         }
+        // 跳过原来的数据，对重新开辟的内存清零(读者这里看不懂需要补充realloc的相关知识)
+        // tmp + *size*elem_size代表跳过原来的数据，(new_size-*size) * elem_size代表在原来数据后面开辟的字节数
         memset(tmp + *size*elem_size, 0, (new_size-*size) * elem_size);
-        *size = new_size;
+        *size = new_size;// 记录新数组的元素总个数，通过参数传出.
         return tmp;
     }
     return array;

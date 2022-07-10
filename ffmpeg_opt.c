@@ -3274,6 +3274,7 @@ static int open_files(OptionGroupList *l, const char *inout,
          * 其中设置的偏移量就是针对这个结构体*/
         init_options(&o);
         o.g = g;
+        printf("open_files &o.codec_names: %#X, o.codec_names: %#X\n", &o.codec_names, o.codec_names);
 
         /*3.将g中存的，从命令行中获取的针对这个输入文件的参数放到o中*/
         ret = parse_optgroup(&o, g);
