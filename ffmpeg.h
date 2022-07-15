@@ -294,16 +294,16 @@ typedef struct FilterGraph {
 } FilterGraph;
 
 typedef struct InputStream {
-    int file_index;
+    int file_index;             // 输入文件的下标.例如-i 1.mp4 -i 2.mp4,两个输入文件下标依次是0,1
     AVStream *st;
-    int discard;             /* true if stream data should be discarded */
+    int discard;                /* true if stream data should be discarded */
     int user_set_discard;
-    int decoding_needed;     /* non zero if the packets must be decoded in 'raw_fifo', see DECODING_FOR_* */
+    int decoding_needed;        /* non zero if the packets must be decoded in 'raw_fifo', see DECODING_FOR_* */
 #define DECODING_FOR_OST    1
 #define DECODING_FOR_FILTER 2
 
-    AVCodecContext *dec_ctx;
-    AVCodec *dec;
+    AVCodecContext *dec_ctx;    // 解码器上下文
+    AVCodec *dec;               // choose_decoder找到的解码器
     AVFrame *decoded_frame;
     AVFrame *filter_frame; /* a ref of decoded_frame, to be sent to filters */
 
@@ -327,11 +327,11 @@ typedef struct InputStream {
     // 当通过-r强制恒定的输入帧率时，这包含了将被赋予下一个解码帧的PTS
     int64_t cfr_next_pts;
 
-    int64_t nb_samples; /* number of samples in the last decoded audio frame before looping */
+    int64_t nb_samples; /* number of samples in the last decoded audio frame before looping.循环前最后解码音频帧中的采样数 */
 
     double ts_scale;
     int saw_first_ts;
-    AVDictionary *decoder_opts;
+    AVDictionary *decoder_opts;         // 用户输入的解码器选项,是从o中复制的
     AVRational framerate;               /* framerate forced with -r */
     int top_field_first;
     int guess_layout_max;
@@ -566,10 +566,10 @@ typedef struct OutputFile {
     int header_written;
 } OutputFile;
 
-extern InputStream **input_streams;
-extern int        nb_input_streams;
-extern InputFile   **input_files;
-extern int        nb_input_files;
+extern InputStream **input_streams;// 二维数组，用于保存每一个InputStream *输入文件
+extern int        nb_input_streams;// 二维数组大小
+extern InputFile   **input_files;  //
+extern int        nb_input_files;  // 输入文件个数
 
 extern OutputStream **output_streams;
 extern int         nb_output_streams;

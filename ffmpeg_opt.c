@@ -44,6 +44,12 @@
 
 #define DEFAULT_PASS_LOGFILENAME_PREFIX "ffmpeg2pass"
 
+/**
+ * @brief 这里看到，MATCH_PER_STREAM_OPT的作用是，遍历用户所有的编解码器名字所属的音视频类型是否都与该流st的st->codecpar->codec_type一样，
+ *              如果存在一个不一样，那么程序直接退出；否则符合，当用户输入多个编解码器名字时，只会取最后一个编解码器名字作为返回.
+ * 例如用户传入：-vcodec libx265 -vcodec libx264，此时假设st是视频流，虽然h265,h264都是属于视频流类型的编解码器，但是只会返回用户最后一个
+ * 编解码器名字，即outvar="libx264"作为传出参数
+ */
 #define MATCH_PER_STREAM_OPT(name, type, outvar, fmtctx, st)\
 {\
     int i, ret;\
@@ -666,17 +672,26 @@ static int opt_recording_timestamp(void *optctx, const char *opt, const char *ar
     return 0;
 }
 
+/**
+ * @brief
+ * @param name 要寻找的编解码器名字
+ * @param type 媒体类型
+ * @param encoder 要进行编码还是解码.0 解码， 1 编码
+ * @return 成功 返回找到的编解码器; 失败 程序退出
+*/
 static AVCodec *find_codec_or_die(const char *name, enum AVMediaType type, int encoder)
 {
     const AVCodecDescriptor *desc;
     const char *codec_string = encoder ? "encoder" : "decoder";
     AVCodec *codec;
 
+    // 1. 根据名字寻找编解码器
     codec = encoder ?
         avcodec_find_encoder_by_name(name) :
         avcodec_find_decoder_by_name(name);
 
-    if (!codec && (desc = avcodec_descriptor_get_by_name(name))) {
+    // 2. 如果根据名字找不到，则使用名字先找编解码器的描述符，再使用描述符寻找编解码器.
+    if (!codec && (desc = avcodec_descriptor_get_by_name(name))) {// 根据名字获取编解码器的描述符
         codec = encoder ? avcodec_find_encoder(desc->id) :
                           avcodec_find_decoder(desc->id);
         if (codec)
@@ -688,6 +703,10 @@ static AVCodec *find_codec_or_die(const char *name, enum AVMediaType type, int e
         av_log(NULL, AV_LOG_FATAL, "Unknown %s '%s'\n", codec_string, name);
         exit_program(1);
     }
+
+    // 3. 对比.根据用户传进的名字找到的编解码器的媒体类型，若与用户传进的不一致，退出程序.
+    // 例如用户传进:-codec:a libx264，那么MATCH_PER_TYPE_OPT匹配时，audio_codec_name="libx264"
+    // 虽然找到编解码器，但音频是没有libx264的，这个找到编解码器是视频的，所以退出.
     if (codec->type != type) {
         av_log(NULL, AV_LOG_FATAL, "Invalid %s type '%s'\n", codec_string, name);
         exit_program(1);
@@ -695,13 +714,40 @@ static AVCodec *find_codec_or_die(const char *name, enum AVMediaType type, int e
     return codec;
 }
 
+// 例如将choose_decoder的MATCH_PER_STREAM_OPT展开来，用于debug
+/**
+ * @brief 这里看到，MATCH_PER_STREAM_OPT的作用是，遍历用户所有的编解码器名字所属的音视频类型是否都与该流st的st->codecpar->codec_type一样，
+ *              如果存在一个不一样，那么程序直接退出；否则当用户输入多个编解码器名字时，只会取最后一个编解码器名字作为返回.
+ * 例如用户传入：-vcodec libx265 -vcodec libx264，此时假设st是视频流，虽然h265,h264都是属于视频流类型的编解码器，但是只会返回用户最后一个
+ * 编解码器名字，即outvar="libx264"作为传出参数
+ */
+void MATCH_PER_STREAM_OPT_TYYCODE(OptionsContext *o,const char* name, const char *type,
+                                  char *outvar, AVFormatContext* fmtctx, AVStream *st){
+    int i, ret;
+    for (i = 0; i < o->nb_codec_names; i++) {
+        char *spec = o->codec_names[i].specifier;
+        if ((ret = check_stream_specifier(fmtctx, st, spec)) > 0)
+            outvar = o->codec_names[i].u.str;
+        else if (ret < 0)
+            exit_program(1);
+    }
+}
+
+/**
+ * @brief 选择解码器.两种方案：
+ * 1.用户传进解码器，那么返回用户选择的解码器，并且st保存了用户选择的解码器的codec_id；
+ * 2.用户无传进解码器，则以流中的codec_id作为选择解码器返回, codec_id无需改变.
+ * 当用户传了 解码器选项时，若音视频类型与流的音视频类型不一致 或者 解码器不被ffmpeg支持，程序会退出.
+ *
+ * 实际上该函数不关心返回值的话，就是应用强制解码器id(apply forced codec ids)
+*/
 static AVCodec *choose_decoder(OptionsContext *o, AVFormatContext *s, AVStream *st)
 {
     char *codec_name = NULL;
 
-    MATCH_PER_STREAM_OPT(codec_names, str, codec_name, s, st);
+    MATCH_PER_STREAM_OPT(codec_names, str, codec_name, s, st);// 判断音视频类型是否与流一致.例如-vcodec libx264,这里是判断'v'是否与st的codec_type一致
     if (codec_name) {
-        AVCodec *codec = find_codec_or_die(codec_name, st->codecpar->codec_type, 0);
+        AVCodec *codec = find_codec_or_die(codec_name, st->codecpar->codec_type, 0);// 判断解码器是否被ffmpeg支持.例如-vcodec libx264,这里是判断 libx264是否被ffmpeg支持
         st->codecpar->codec_id = codec->id;
         return codec;
     } else
@@ -724,15 +770,17 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
         char *codec_tag = NULL;
         char *next;
         char *discard_str = NULL;
-        const AVClass *cc = avcodec_get_class();
+        const AVClass *cc = avcodec_get_class();// 获取AVCodecContext的AVClass
         const AVOption *discard_opt = av_opt_find(&cc, "skip_frame", NULL, 0, 0);
 
         if (!ist)
             exit_program(1);
 
-        GROW_ARRAY(input_streams, nb_input_streams);
+        // 往二维数组input_streams**增加一个input_streams*元素
+        GROW_ARRAY(input_streams, nb_input_streams);//注：这里只是开辟了InputStream *字节大小(64bit为8字节)，而不是开辟InputStream字节大小(sizeof(InputStream))
         input_streams[nb_input_streams - 1] = ist;
 
+        // 下面是利用o对InputStream内部进行赋值或者直接赋默认值
         ist->st = st;
         ist->file_index = nb_input_files;
         ist->discard = 1;
@@ -749,13 +797,16 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
 
         MATCH_PER_STREAM_OPT(codec_tags, str, codec_tag, ic, st);
         if (codec_tag) {
-            uint32_t tag = strtol(codec_tag, &next, 0);
-            if (*next)
+            //strtlo see https://blog.csdn.net/weixin_37921201/article/details/119718403
+            uint32_t tag = strtol(codec_tag, &next, 0);// next指向非法字符串开始及后面的字符串.
+            if (*next)// codec_tag出现非法字符串的处理
                 tag = AV_RL32(codec_tag);
             st->codecpar->codec_tag = tag;
         }
 
+        // 保存解码器
         ist->dec = choose_decoder(o, ic, st);
+        // 保存解码器选项。将o->g->codec_opts保存的解码器选项通过返回值设置到decoder_opts中。
         ist->decoder_opts = filter_codec_opts(o->g->codec_opts, ist->st->codecpar->codec_id, ic, st, ist->dec);
 
         ist->reinit_filters = -1;
@@ -764,6 +815,7 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
         MATCH_PER_STREAM_OPT(discard, str, discard_str, ic, st);
         ist->user_set_discard = AVDISCARD_NONE;
 
+        // 只要有视频或者音频或者字幕或者数据被禁用，那么user_set_discard标记为AVDISCARD_ALL
         if ((o->video_disable && ist->st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) ||
             (o->audio_disable && ist->st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ||
             (o->subtitle_disable && ist->st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) ||
@@ -778,12 +830,14 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
 
         ist->filter_in_rescale_delta_last = AV_NOPTS_VALUE;
 
+        // 为解码器上下文开辟内存
         ist->dec_ctx = avcodec_alloc_context3(ist->dec);
         if (!ist->dec_ctx) {
             av_log(NULL, AV_LOG_ERROR, "Error allocating the decoder context.\n");
             exit_program(1);
         }
 
+        // 从流中拷贝参数到解码器上下文
         ret = avcodec_parameters_to_context(ist->dec_ctx, par);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error initializing the decoder context.\n");
@@ -919,7 +973,7 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
             av_log(NULL, AV_LOG_ERROR, "Error initializing the decoder context.\n");
             exit_program(1);
         }
-    }
+    }//<== for (i = 0; i < ic->nb_streams; i++) { end ==>
 }
 
 static void assert_file_overwrite(const char *filename)
@@ -1012,11 +1066,14 @@ static int open_input_file(OptionsContext *o, const char *filename)
     char *    data_codec_name = NULL;
     int scan_all_pmts_set = 0;
 
+    // -t and -to cannot be used together; using -t
+    // -t是录制时长.例如:ffmpeg -rtsp_transport tcp -y -re -i rtsp://xxx -vcodec copy -t 00:00:10.00 -f mp4 output.mp4
     if (o->stop_time != INT64_MAX && o->recording_time != INT64_MAX) {
         o->stop_time = INT64_MAX;
         av_log(NULL, AV_LOG_WARNING, "-t and -to cannot be used together; using -t.\n");
     }
 
+    // -to value smaller than -ss; aborting.
     if (o->stop_time != INT64_MAX && o->recording_time == INT64_MAX) {
         int64_t start_time = o->start_time == AV_NOPTS_VALUE ? 0 : o->start_time;
         if (o->stop_time <= start_time) {
@@ -1027,6 +1084,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
         }
     }
 
+    /*在options[]中对应“f”，指定输入文件的格式“-f”*/
     if (o->format) {
         if (!(file_iformat = av_find_input_format(o->format))) {
             av_log(NULL, AV_LOG_FATAL, "Unknown input format: '%s'\n", o->format);
@@ -1034,21 +1092,34 @@ static int open_input_file(OptionsContext *o, const char *filename)
         }
     }
 
+    // 如果是管道,输入文件名为“-”
     if (!strcmp(filename, "-"))
         filename = "pipe:";
 
+    /*stdin_interaction针对参数-stdin*/
+    // 运算符优先级,记忆口决："单算移关与，异或逻条赋", 具体看https://blog.csdn.net/sgbl888/article/details/123997358
+    // 不过下面语句等价于：stdin_interaction = stdin_interaction & (strncmp(filename, "pipe:", 5) && strcmp(filename, "/dev/stdin"));
+    // 意思是：如果filename不是pipe:开头，那么再判断filename是否是/dev/stdin
+    //auto tyy1 = strncmp(filename, "pipe:", 5) && strcmp(filename, "/dev/stdin");
+    //stdin_interaction = stdin_interaction & (strncmp(filename, "pipe:", 5) && strcmp(filename, "/dev/stdin"));// 等价于下面语句
     stdin_interaction &= strncmp(filename, "pipe:", 5) &&
                          strcmp(filename, "/dev/stdin");
 
+    // 1. 为输入文件开辟相关内存
     /* get default parameters from command line */
     ic = avformat_alloc_context();
     if (!ic) {
         print_error(filename, AVERROR(ENOMEM));
         exit_program(1);
     }
+
+    // 1.1 解复用相关参数设置(不过平时输入文件很少设置过多的参数,输出文件才会)
+    /*对应参数“-ar”设置音频采样率*/
     if (o->nb_audio_sample_rate) {
         av_dict_set_int(&o->g->format_opts, "sample_rate", o->audio_sample_rate[o->nb_audio_sample_rate - 1].u.i, 0);
     }
+
+    /*对应参数"-ac"*/
     if (o->nb_audio_channels) {
         /* because we set audio_channels based on both the "ac" and
          * "channel_layout" options, we need to check that the specified
@@ -1059,6 +1130,8 @@ static int open_input_file(OptionsContext *o, const char *filename)
             av_dict_set_int(&o->g->format_opts, "channels", o->audio_channels[o->nb_audio_channels - 1].u.i, 0);
         }
     }
+
+    /*对应参数"r"帧率，注与re是不一样的，re对应成员是rate_emu*/
     if (o->nb_frame_rates) {
         /* set the format-level framerate option;
          * this is important for video grabbers, e.g. x11 */
@@ -1069,17 +1142,30 @@ static int open_input_file(OptionsContext *o, const char *filename)
                         o->frame_rates[o->nb_frame_rates - 1].u.str, 0);
         }
     }
+
+    //对应参数"s"
     if (o->nb_frame_sizes) {
         av_dict_set(&o->g->format_opts, "video_size", o->frame_sizes[o->nb_frame_sizes - 1].u.str, 0);
     }
+
+    //对应参数"pix_fmt"
     if (o->nb_frame_pix_fmts)
         av_dict_set(&o->g->format_opts, "pixel_format", o->frame_pix_fmts[o->nb_frame_pix_fmts - 1].u.str, 0);
 
+    //对应参数"c"和"codec" 或"c:[v/a/s/d]"和"codec:[v/a/s/d]"
+    //最终通过参数3传出.假设我们传-codec libx264, 那么video_codec_name="libx264"
+    //因为传入时o->name[i].u.str会指向"libx264"
     MATCH_PER_TYPE_OPT(codec_names, str,    video_codec_name, ic, "v");
     MATCH_PER_TYPE_OPT(codec_names, str,    audio_codec_name, ic, "a");
     MATCH_PER_TYPE_OPT(codec_names, str, subtitle_codec_name, ic, "s");
     MATCH_PER_TYPE_OPT(codec_names, str,     data_codec_name, ic, "d");
 
+    /*
+     下面第2，第3步是对ic的video_codec,audio_codec,subtitle_codec,data_codec以及
+     video_codec_id,audio_codec_id,subtitle_codec_id,data_codec赋值
+    */
+    // 2. 根据用户输入指定的编解码器格式，寻找对应的编解码器
+    // 找到则赋值给解复用结构体ic，找不到会在find_codec_or_die直接退出
     if (video_codec_name)
         ic->video_codec    = find_codec_or_die(video_codec_name   , AVMEDIA_TYPE_VIDEO   , 0);
     if (audio_codec_name)
@@ -1089,37 +1175,50 @@ static int open_input_file(OptionsContext *o, const char *filename)
     if (data_codec_name)
         ic->data_codec     = find_codec_or_die(data_codec_name    , AVMEDIA_TYPE_DATA    , 0);
 
+    // 来到这说明成功找到编解码器(因为失败会在find_codec_or_die直接退出出现)
+    // 3. 若指定输入文件的编解码器，则将编解码器中的id赋值给解复用的id; 若无指定，解码器的id为xxx_ID_NONE
     ic->video_codec_id     = video_codec_name    ? ic->video_codec->id    : AV_CODEC_ID_NONE;
     ic->audio_codec_id     = audio_codec_name    ? ic->audio_codec->id    : AV_CODEC_ID_NONE;
     ic->subtitle_codec_id  = subtitle_codec_name ? ic->subtitle_codec->id : AV_CODEC_ID_NONE;
     ic->data_codec_id      = data_codec_name     ? ic->data_codec->id     : AV_CODEC_ID_NONE;
 
+    /*ffmpeg的avformat_open_input()和av_read_frame()默认是阻塞的.
+     * 1)用户可以通过设置"ic->flags |= AVFMT_FLAG_NONBLOCK;"设置成非阻塞(通常是不推荐的)；
+     * 2)或者是设置超时时间；
+     * 3)或者是设置interrupt_callback定义返回机制。
+    */
     ic->flags |= AVFMT_FLAG_NONBLOCK;
     if (o->bitexact)
         ic->flags |= AVFMT_FLAG_BITEXACT;
-    ic->interrupt_callback = int_cb;
+    ic->interrupt_callback = int_cb;// 设置中断函数
 
+    // 4. avformat_open_input打开输入文件，打开时可以设置解复用的相关参数
+    // scan_all_pmts是mpegts的一个选项，表示扫描全部的ts流的"Program Map Table"表。这里在没有设定该选项的时候，强制设为1。
     if (!av_dict_get(o->g->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
         av_dict_set(&o->g->format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
         scan_all_pmts_set = 1;
     }
     /* open the input file with generic avformat function */
-    err = avformat_open_input(&ic, filename, file_iformat, &o->g->format_opts);
+    err = avformat_open_input(&ic, filename, file_iformat, &o->g->format_opts);// 这里看到，解复用的参数最终使用该函数去设置的
     if (err < 0) {
         print_error(filename, err);
         if (err == AVERROR_PROTOCOL_NOT_FOUND)
             av_log(NULL, AV_LOG_ERROR, "Did you mean file:%s?\n", filename);
         exit_program(1);
     }
+    // 打开输入文件后，将该选项置空
     if (scan_all_pmts_set)
         av_dict_set(&o->g->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
     remove_avoptions(&o->g->format_opts, o->g->codec_opts);
+    // 上面我们会将有效的条目置空，所以此时还有条目，代表该条目是不合法的。
     assert_avoptions(o->g->format_opts);
 
+    // 5. 若用户设置解码器，会查找解码器，并把找到解码器的id赋值到streams中
     /* apply forced codec ids */
     for (i = 0; i < ic->nb_streams; i++)
         choose_decoder(o, ic, ic->streams[i]);
 
+    // 6. 是否查找流信息.
     if (find_stream_info) {
         AVDictionary **opts = setup_find_stream_info_opts(ic, o->g->codec_opts);
         int orig_nb_streams = ic->nb_streams;
@@ -1128,6 +1227,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
            first frames to get it. (used in mpeg case for example) */
         ret = avformat_find_stream_info(ic, opts);
 
+        // 释放setup_find_stream_info_opts内部开辟的内存
         for (i = 0; i < orig_nb_streams; i++)
             av_dict_free(&opts[i]);
         av_freep(&opts);
@@ -1141,6 +1241,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
         }
     }
 
+    //对应参数"sseof",设置相对于结束的开始时间
     if (o->start_time != AV_NOPTS_VALUE && o->start_time_eof != AV_NOPTS_VALUE) {
         av_log(NULL, AV_LOG_WARNING, "Cannot use -ss and -sseof both, using -ss for %s\n", filename);
         o->start_time_eof = AV_NOPTS_VALUE;
@@ -1165,6 +1266,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
     if (!o->seek_timestamp && ic->start_time != AV_NOPTS_VALUE)
         timestamp += ic->start_time;
 
+    // 如果开始时间指定的话, 需要做seek
     /* if seeking requested, we execute it */
     if (o->start_time != AV_NOPTS_VALUE) {
         int64_t seek_timestamp = timestamp;
@@ -1179,6 +1281,8 @@ static int open_input_file(OptionsContext *o, const char *filename)
                 }
             }
             if (dts_heuristic) {
+                //笔者猜测这里意思是：若ffmpeg存在视频帧延迟(估计是ffmpeg内部缓冲？还是解码造成dts、pts的差距？)，
+                //那么seek时，应当稍微减少一点seek_timestamp. 3/23大概是3帧的时长，*AV_TIME_BASE是单位转成秒.
                 seek_timestamp -= 3*AV_TIME_BASE / 23;
             }
         }

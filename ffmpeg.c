@@ -634,6 +634,11 @@ static void ffmpeg_cleanup(int ret)
     ffmpeg_exited = 1;
 }
 
+/**
+ * @brief 利用b中的key，将a中有同样key的value设置为NULL.获取时忽略后缀，设置时匹配大小写.
+ * @param a 字典1
+ * @param b 字典2
+*/
 void remove_avoptions(AVDictionary **a, AVDictionary *b)
 {
     AVDictionaryEntry *t = NULL;
@@ -643,6 +648,9 @@ void remove_avoptions(AVDictionary **a, AVDictionary *b)
     }
 }
 
+/**
+ * @brief 只有m中还有一个k-v键值对选项，那么程序就会退出.
+*/
 void assert_avoptions(AVDictionary *m)
 {
     AVDictionaryEntry *t;
@@ -4840,6 +4848,43 @@ static int64_t getmaxrss(void)
 
 static void log_callback_null(void *ptr, int level, const char *fmt, va_list vl)
 {
+}
+
+// tyycode我们加上这个结构体，会真的非常方便我们debug!!!!!!
+struct AVDictionary {
+    int count;
+    AVDictionaryEntry *elems;
+};
+
+// tyycode
+AVDictionaryEntry *av_dict_get1(const AVDictionary *m, const char *key,
+                               const AVDictionaryEntry *prev, int flags)
+{
+    unsigned int i, j;
+
+    if (!m)
+        return NULL;
+
+    if (prev)
+        i = prev - m->elems + 1;
+    else
+        i = 0;
+
+    for (; i < m->count; i++) {
+        const char *s = m->elems[i].key;
+        if (flags & AV_DICT_MATCH_CASE)
+            for (j = 0; s[j] == key[j] && key[j]; j++)
+                ;
+        else
+            for (j = 0; av_toupper(s[j]) == av_toupper(key[j]) && key[j]; j++)
+                ;
+        if (key[j])
+            continue;
+        if (s[j] && !(flags & AV_DICT_IGNORE_SUFFIX))
+            continue;
+        return &m->elems[i];
+    }
+    return NULL;
 }
 
 int main(int argc, char **argv)

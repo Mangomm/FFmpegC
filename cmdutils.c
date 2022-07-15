@@ -2238,13 +2238,38 @@ FILE *get_preset_file(char *filename, size_t filename_size,
     return f;
 }
 
+/**
+ * @brief 判断当前st是否与用户的spec匹配。
+ * @param s
+ * @param st 流
+ * @param spec 流字符描述，一般是用户输入，ffmpeg分割命令行保存在结构体中
+ * @return >0 匹配; =0 不匹配; <0 失败
+ */
 int check_stream_specifier(AVFormatContext *s, AVStream *st, const char *spec)
 {
+    /*检查s中包含的流st是否与流说明符spec匹配。
+    有关规范的语法，请参阅文档中的“流说明符”一章。
+    >0 if st is matched by spec;
+    =0  if st is not matched by spec;
+    AVERROR code if spec is invalid*/
+    // avformat_match_stream_specifier支持使用下标('0'-'9')、音视频类型字符('v','a','s','d','t','V')以及其他类型判断流.
+    // 这里ffmpeg.c使用'v','a','s'等字符去判断, ffplay使用下标去判断.
+    // 例如ffplay的调用:if (avformat_match_stream_specifier(ic, st, wanted_stream_spec[type]) > 0)
+    // 这是笔者看avformat_match_stream_specifier源码得到的信息, 看源码得出，使用音视频类型字符判断是最简单.
+    // 备注：源码中spec是空字符串的话，默认是返回1匹配成功的
     int ret = avformat_match_stream_specifier(s, st, spec);
     if (ret < 0)
         av_log(s, AV_LOG_ERROR, "Invalid stream specifier: %s.\n", spec);
     return ret;
 }
+
+/**
+ * @brief 后续再分析
+ * 我们大概知道它的作用即可：
+ * 它会判断用户输入的编解码器选项参数opts是否在对应的AVClass的选项中，这一步是通过av_opt_find实现；
+ * 如果存在，那么通过av_dict_set设置到一个新的字典，即这里的ret，然后通过返回值返回.
+ * @note av_opt_find的源码有点复杂.
+ */
 
 AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
                                 AVFormatContext *s, AVStream *st, AVCodec *codec)
@@ -2252,9 +2277,9 @@ AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
     AVDictionary    *ret = NULL;
     AVDictionaryEntry *t = NULL;
     int            flags = s->oformat ? AV_OPT_FLAG_ENCODING_PARAM
-                                      : AV_OPT_FLAG_DECODING_PARAM;
+                                      : AV_OPT_FLAG_DECODING_PARAM;// 没有-f参数，说明是输入文件，需要解码
     char          prefix = 0;
-    const AVClass    *cc = avcodec_get_class();
+    const AVClass    *cc = avcodec_get_class();// 返回AVCodecContext的AVClass
 
     if (!codec)
         codec            = s->oformat ? avcodec_find_encoder(codec_id)
@@ -2276,7 +2301,7 @@ AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
     }
 
     while (t = av_dict_get(opts, "", t, AV_DICT_IGNORE_SUFFIX)) {
-        char *p = strchr(t->key, ':');
+        char *p = strchr(t->key, ':');// 找子串,例"nihao:v",那么执行后p=":v"
 
         /* check stream specification in opt name */
         if (p)
@@ -2303,20 +2328,46 @@ AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
     return ret;
 }
 
+/**
+ * @brief 为输入文件的每一个流都开辟一个字典，若用户设置了某个流的编解码器选项，则过滤后，
+ *          对应的字典会保存选项。一般用户很少对输入文件添加编解码器选项。
+ * @param s
+ * @param codec_opts 一般是用户输入的编解码器选项
+ */
 AVDictionary **setup_find_stream_info_opts(AVFormatContext *s,
                                            AVDictionary *codec_opts)
 {
     int i;
     AVDictionary **opts;
+    opts = NULL;// tyycode
+    printf("opts: %#X\n", opts);
 
     if (!s->nb_streams)
         return NULL;
+
+    // 1. 为nb_streams流各自开辟一个AVDictionary字典.
+    // 开辟后,opts不为空，opts[i]每个元素都指向空
     opts = av_mallocz_array(s->nb_streams, sizeof(*opts));
     if (!opts) {
         av_log(NULL, AV_LOG_ERROR,
                "Could not alloc memory for stream options.\n");
         return NULL;
     }
+    printf("opts: %#X\n", opts);// 注，qt对二级指针的debug不是很好，不加打印，直接看堆栈时opts在qt是0x0.我已经遇到好几次了.
+    if(opts == NULL){
+        printf("opts is null\n");
+    }
+    if(*opts){
+        printf("*opts not is null\n");
+    }else{
+        printf("*opts is null\n");
+    }
+
+    // 2. 若指定了输入文件的解码器参数，会进行过滤.
+    // 过滤后会通过返回值保存到opts数组中
+    // 不过一般很少支持输入文件的解码器,例如本项目当时编译时没有支持,可使用ffmpeg -codecs | findstr 264查看
+    //  例如有的是支持的输出看到：decoders: h264 h264_qsv h264_cuvid，我们可在-i前加上 -codec h264
+    // 部分解码器名字可以参考https://blog.csdn.net/weixin_42887343/article/details/112435362.
     for (i = 0; i < s->nb_streams; i++)
         opts[i] = filter_codec_opts(codec_opts, s->streams[i]->codecpar->codec_id,
                                     s, s->streams[i], NULL);

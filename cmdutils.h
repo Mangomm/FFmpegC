@@ -144,7 +144,7 @@ int64_t parse_time_or_die(const char *context, const char *timestr,
                           int is_duration);
 
 typedef struct SpecifierOpt {
-    char *specifier;    /**< stream/chapter/program/... specifier */
+    char *specifier;    /**< stream/chapter/program/... specifier */// 例如存放"v","a"等用于区别音视频类型
     union {
         uint8_t *str;
         int        i;
