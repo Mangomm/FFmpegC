@@ -2085,18 +2085,32 @@ static void do_streamcopy(InputStream *ist, OutputStream *ost, const AVPacket *p
     output_packet(of, &opkt, ost, 0);
 }
 
+/**
+ * @brief 这个猜测输入音频的通道布局思路很简单：
+ * 1. 若输入流的解码器上下文的通道布局的值=0，则通过通道数去获取通道布局，
+ *      若通道数也为0，看av_get_default_channel_layout源码知道，通道布局还是返回0，
+ * 2. 若有，则直接返回1.
+ * @return =1 获取输入流的通道布局成功； =0 获取输入流的通道布局失败
+ */
 int guess_input_channel_layout(InputStream *ist)
 {
     AVCodecContext *dec = ist->dec_ctx;
 
+    // 1. 若通道布局为0
     if (!dec->channel_layout) {
         char layout_name[256];
-
+        // 1.1 判断通道channels是否越界，越界则返回0，因为guess_layout_max被赋值为INT_MAX
         if (dec->channels > ist->guess_layout_max)
             return 0;
+
+        // 1.2 通过通道数获取通道布局
         dec->channel_layout = av_get_default_channel_layout(dec->channels);
         if (!dec->channel_layout)
             return 0;
+
+        // 1.3 通过通道数获取通道布局成功后，获取该通道布局的字符串描述.
+        // 这一步只是打印警告，注释掉实际上不会影响正常逻辑
+        // Return a description of a channel layout.
         av_get_channel_layout_string(layout_name, sizeof(layout_name),
                                      dec->channels, dec->channel_layout);
         av_log(NULL, AV_LOG_WARNING, "Guessed Channel Layout for Input Stream "

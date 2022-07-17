@@ -756,7 +756,8 @@ static AVCodec *choose_decoder(OptionsContext *o, AVFormatContext *s, AVStream *
 
 /* Add all the streams from the given input file to the global
  * list of input streams. */
-static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
+// 该函数实际上是对输入流中解码器相关参数的处理，然后封装到InputStream结构体中
+static void  add_input_streams(OptionsContext *o, AVFormatContext *ic)
 {
     int i, ret;
 
@@ -849,7 +850,7 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
 
         switch (par->codec_type) {
         case AVMEDIA_TYPE_VIDEO:
-            if(!ist->dec)
+            if(!ist->dec)// 一般在choose_decoder时已经找到
                 ist->dec = avcodec_find_decoder(par->codec_id);
 #if FF_API_LOWRES
             if (st->codec->lowres) {
@@ -862,6 +863,7 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
 #endif
 
             // avformat_find_stream_info() doesn't set this for us anymore.
+            // avformat_find_stream_info()不再为我们设置这个。
             ist->dec_ctx->framerate = st->avg_frame_rate;
 
             MATCH_PER_STREAM_OPT(frame_rates, str, framerate, ic, st);
@@ -875,9 +877,16 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
             ist->top_field_first = -1;
             MATCH_PER_STREAM_OPT(top_field_first, i, ist->top_field_first, ic, st);
 
+            // 硬件加速相关.
+            // 寻找硬件设备的id
+            // 可参考https://blog.csdn.net/u012117034/article/details/123470108
             MATCH_PER_STREAM_OPT(hwaccels, str, hwaccel, ic, st);
             if (hwaccel) {
                 // The NVDEC hwaccels use a CUDA device, so remap the name here.
+                // NVDEC hwaccels使用CUDA设备，所以在这里重新映射名称。
+                // NVDEC是英伟达提供的一种视频解码器引擎，作用是用来解码，可认为是一个SDK库。see https://blog.csdn.net/qq_18998145/article/details/108535188
+                // cuda则是一种架构，使用CPU+GPU去处理各种复杂的运算。see https://baike.baidu.com/item/CUDA/1186262?fr=aladdin
+                // 所以这里再重新看这段代码：因为nvdec内部使用的是cuda架构，所以重新映射hwaccel字符串
                 if (!strcmp(hwaccel, "nvdec"))
                     hwaccel = "cuda";
 
@@ -885,7 +894,7 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
                     ist->hwaccel_id = HWACCEL_NONE;
                 else if (!strcmp(hwaccel, "auto"))
                     ist->hwaccel_id = HWACCEL_AUTO;
-                else {
+                else {// 用户指定了具体的硬件解码器
                     enum AVHWDeviceType type;
                     int i;
                     for (i = 0; hwaccels[i].name; i++) {
@@ -895,7 +904,9 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
                         }
                     }
 
+                    // hwaccel_id=HWACCEL_NONE时
                     if (!ist->hwaccel_id) {
+                        // 根据设备类型名称查找，该函数不区分大小写。找不到会返回AV_HWDEVICE_TYPE_NONE
                         type = av_hwdevice_find_type_by_name(hwaccel);
                         if (type != AV_HWDEVICE_TYPE_NONE) {
                             ist->hwaccel_id = HWACCEL_GENERIC;
@@ -903,23 +914,29 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
                         }
                     }
 
+                    // hwaccel_id还是为HWACCEL_NONE时，打印相关错误提示然后程序退出
                     if (!ist->hwaccel_id) {
                         av_log(NULL, AV_LOG_FATAL, "Unrecognized hwaccel: %s.\n",
                                hwaccel);
                         av_log(NULL, AV_LOG_FATAL, "Supported hwaccels: ");
                         type = AV_HWDEVICE_TYPE_NONE;
+                        // av_hwdevice_iterate_types函数每次会返回在hw_table中，上一个id为prev的硬件解码器id
+                        // hw_table是源码中的一个硬件映射表，保存了各个解码器的处理函数
                         while ((type = av_hwdevice_iterate_types(type)) !=
                                AV_HWDEVICE_TYPE_NONE)
                             av_log(NULL, AV_LOG_FATAL, "%s ",
                                    av_hwdevice_get_type_name(type));
+
+
                         for (i = 0; hwaccels[i].name; i++)
                             av_log(NULL, AV_LOG_FATAL, "%s ", hwaccels[i].name);
                         av_log(NULL, AV_LOG_FATAL, "\n");
                         exit_program(1);
                     }
                 }
-            }
+            }//<== if (hwaccel) end ==>
 
+            // 保存硬件设备名？
             MATCH_PER_STREAM_OPT(hwaccel_devices, str, hwaccel_device, ic, st);
             if (hwaccel_device) {
                 ist->hwaccel_device = av_strdup(hwaccel_device);
@@ -945,15 +962,16 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
         case AVMEDIA_TYPE_AUDIO:
             ist->guess_layout_max = INT_MAX;
             MATCH_PER_STREAM_OPT(guess_layout_max, i, ist->guess_layout_max, ic, st);
-            guess_input_channel_layout(ist);
+            guess_input_channel_layout(ist);// 设置通道布局到ist中
             break;
         case AVMEDIA_TYPE_DATA:
         case AVMEDIA_TYPE_SUBTITLE: {
             char *canvas_size = NULL;
-            if(!ist->dec)
+            if(!ist->dec)// 一般在choose_decoder时已经找到
                 ist->dec = avcodec_find_decoder(par->codec_id);
             MATCH_PER_STREAM_OPT(fix_sub_duration, i, ist->fix_sub_duration, ic, st);
             MATCH_PER_STREAM_OPT(canvas_sizes, str, canvas_size, ic, st);
+            // av_parse_video_size:解析字符串canvas_size，并将值赋值给参1、参2
             if (canvas_size &&
                 av_parse_video_size(&ist->dec_ctx->width, &ist->dec_ctx->height, canvas_size) < 0) {
                 av_log(NULL, AV_LOG_FATAL, "Invalid canvas size: %s.\n", canvas_size);
@@ -966,8 +984,11 @@ static void add_input_streams(OptionsContext *o, AVFormatContext *ic)
             break;
         default:
             abort();
-        }
+        }//<== switch (par->codec_type) end ==>
 
+        // 上面看到，一开始是使用avcodec_parameters_to_context(ist->dec_ctx, par)将流中
+        // 的信息拷贝到解码器上下文，然后对解码器上下文里的参数赋值后，重新拷贝到流中。
+        // par是st->codecpar流中的信息.
         ret = avcodec_parameters_from_context(par, ist->dec_ctx);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error initializing the decoder context.\n");
@@ -1294,6 +1315,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
     }
 
     /* update the current parameters so that they match the one of the input stream */
+    // 执行完该函数后，输入文件中各个流就会被保存到input_streams这个二维数组
     add_input_streams(o, ic);
 
     /* dump the file content */

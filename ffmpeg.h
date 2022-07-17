@@ -363,7 +363,7 @@ typedef struct InputStream {
     int reinit_filters;
 
     /* hwaccel options */
-    enum HWAccelID hwaccel_id;
+    enum HWAccelID hwaccel_id;                  // 硬件解码器id
     enum AVHWDeviceType hwaccel_device_type;
     char  *hwaccel_device;
     enum AVPixelFormat hwaccel_output_format;
@@ -566,7 +566,9 @@ typedef struct OutputFile {
     int header_written;
 } OutputFile;
 
-extern InputStream **input_streams;// 二维数组，用于保存每一个InputStream *输入文件
+// 二维数组，用于保存每一个InputStream *输入文件里面的各个流，例如保存了视频流+音频流
+// 那么input_streams[0]、input_streams[1]就是对应音视频流的信息
+extern InputStream **input_streams;
 extern int        nb_input_streams;// 二维数组大小
 extern InputFile   **input_files;  //
 extern int        nb_input_files;  // 输入文件个数
