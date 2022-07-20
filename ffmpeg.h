@@ -99,24 +99,24 @@ typedef struct OptionsContext {
     int64_t start_time;
     int64_t start_time_eof;
     int seek_timestamp;
-    const char *format;
+    const char *format;                         // -f选项
 
-    SpecifierOpt *codec_names;                  //offset:40
+    SpecifierOpt *codec_names;                  //offset:40,-vcodec
     int        nb_codec_names;
     SpecifierOpt *audio_channels;
     int        nb_audio_channels;
     SpecifierOpt *audio_sample_rate;
     int        nb_audio_sample_rate;
-    SpecifierOpt *frame_rates;                  //offset:88
+    SpecifierOpt *frame_rates;                  //offset:88, -r选项
     int        nb_frame_rates;
-    SpecifierOpt *frame_sizes;
+    SpecifierOpt *frame_sizes;                  // -s选项
     int        nb_frame_sizes;
     SpecifierOpt *frame_pix_fmts;
     int        nb_frame_pix_fmts;
 
     /* input options */
     int64_t input_ts_offset;                    //offset:136
-    int loop;
+    int loop;                                   //循环次数.例如无限次,-stream_loop -1
     int rate_emu;                               //offset:148 -re
     int accurate_seek;
     int thread_queue_size;
@@ -152,11 +152,11 @@ typedef struct OptionsContext {
     uint64_t limit_filesize;
     float mux_preload;
     float mux_max_delay;
-    int shortest;
+    int shortest;               // -shortest选项
     int bitexact;
 
-    int video_disable;
-    int audio_disable;
+    int video_disable;          // -vn选项
+    int audio_disable;          // -an选项
     int subtitle_disable;
     int data_disable;
 
@@ -392,12 +392,13 @@ typedef struct InputStream {
     int got_output;
 } InputStream;
 
+// 封装输入文件相关信息的结构体
 typedef struct InputFile {
-    AVFormatContext *ctx;
+    AVFormatContext *ctx; // 输入文件的ctx
     int eof_reached;      /* true if eof reached */
     int eagain;           /* true if last read attempt returned EAGAIN */
     int ist_index;        /* index of first stream in input_streams */
-    int loop;             /* set number of times input stream should be looped */
+    int loop;             /* set number of times input stream should be looped *///循环次数.例如无限次,-stream_loop -1
     int64_t duration;     /* actual duration of the longest stream in a file
                              at the moment when looping happens */
     AVRational time_base; /* time base of the duration */
@@ -554,8 +555,8 @@ typedef struct OutputStream {
 } OutputStream;
 
 typedef struct OutputFile {
-    AVFormatContext *ctx;
-    AVDictionary *opts;
+    AVFormatContext *ctx;   // 输出文件的解复用上下文
+    AVDictionary *opts;     // 解复用选项
     int ost_index;       /* index of the first stream in output_streams */
     int64_t recording_time;  ///< desired length of the resulting file in microseconds == AV_TIME_BASE units
     int64_t start_time;      ///< start time in microseconds == AV_TIME_BASE units
@@ -569,14 +570,14 @@ typedef struct OutputFile {
 // 二维数组，用于保存每一个InputStream *输入文件里面的各个流，例如保存了视频流+音频流
 // 那么input_streams[0]、input_streams[1]就是对应音视频流的信息
 extern InputStream **input_streams;
-extern int        nb_input_streams;// 二维数组大小
-extern InputFile   **input_files;  //
+extern int        nb_input_streams;// input_streams二维数组大小
+extern InputFile   **input_files;  // 用于保存多个输入文件
 extern int        nb_input_files;  // 输入文件个数
 
 extern OutputStream **output_streams;
 extern int         nb_output_streams;
-extern OutputFile   **output_files;
-extern int         nb_output_files;
+extern OutputFile   **output_files;// 用于保存多个输出文件
+extern int         nb_output_files;// 输出文件个数
 
 extern FilterGraph **filtergraphs;
 extern int        nb_filtergraphs;

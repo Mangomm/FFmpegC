@@ -4987,6 +4987,7 @@ int main(int argc, char **argv)
     }
 
     /* file converter / grab */
+    // 实际上这里ffmpeg不需要判断nb_output_files <= 0，因为上面已经判断了
     if (nb_output_files <= 0) {
         av_log(NULL, AV_LOG_FATAL, "At least one output file must be specified\n");
         exit_program(1);
