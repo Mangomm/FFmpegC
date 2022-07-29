@@ -2177,11 +2177,18 @@ int show_help(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
+/**
+ * @brief 判断用户输入的字符是否为Y，是返回1，否返回0.
+ * @note 有个while的原因是：例如我们输入N后，需要按下enter(即'\n')，所以实际上在缓冲区中是存储了两个字符，
+ * 一个是'N'，一个是'\n'，而我们在int c = getchar();实际上只读了一个字符'N'，所以我们需要再读一个，以便让函数返回
+ * 而直接按下enter，则缓冲区只有一个字符'\n'，所以直接按下enter会返回0.
+*/
 int read_yesno(void)
 {
     int c = getchar();
     int yesno = (av_toupper(c) == 'Y');
 
+    // 只要输入的字符不是\n或者EOF，那么就进入while；否则不进入
     while (c != '\n' && c != EOF)
         c = getchar();
 
@@ -2264,10 +2271,15 @@ int check_stream_specifier(AVFormatContext *s, AVStream *st, const char *spec)
 }
 
 /**
- * @brief 后续再分析
- * 我们大概知道它的作用即可：
- * 它会判断用户输入的编解码器选项参数opts是否在对应的AVClass的选项中，这一步是通过av_opt_find实现；
- * 如果存在，那么通过av_dict_set设置到一个新的字典，即这里的ret，然后通过返回值返回.
+ * @brief 将用户指定输入或者输出文件的编解码器选项转移到一个临时变量，然后通过返回值返回
+ * @param opts 用户指定输入或者输出文件的编解码器选项
+ * @param codec_id 编解码器id，只当codec为空时有用
+ * @param s 输入或者输出文件的上下文，codec为空以及check_stream_specifier匹配流与媒体类型符时有用
+ * @param st 流
+ * @param codec 解码器或者是编码器
+ *
+ * @return 成功=返回用户指定输入或者输出文件的编解码器选项(不带流标识符)； 失败=程序退出
+ *
  * @note av_opt_find的源码有点复杂.
  */
 
@@ -2285,6 +2297,7 @@ AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
         codec            = s->oformat ? avcodec_find_encoder(codec_id)
                                       : avcodec_find_decoder(codec_id);
 
+    // 1. 使用临时变量prefix、flags记录对应媒体类型
     switch (st->codecpar->codec_type) {
     case AVMEDIA_TYPE_VIDEO:
         prefix  = 'v';
@@ -2300,31 +2313,37 @@ AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
         break;
     }
 
+    // 2. 真正将用户命令行中编解码器选项设置到编解码器的流程
     while (t = av_dict_get(opts, "", t, AV_DICT_IGNORE_SUFFIX)) {
         char *p = strchr(t->key, ':');// 找子串,例"nihao:v",那么执行后p=":v"
 
+        /*2.1 若找到":"，检测一下该specifier字符是否与流st匹配，然后把流标识符去掉.若不匹配程序退出*/
         /* check stream specification in opt name */
         if (p)
             switch (check_stream_specifier(s, st, p + 1)) {
-            case  1: *p = 0; break;
+            case  1: *p = 0; printf("p: %s\n", p);break;
             case  0:         continue;
             default:         exit_program(1);
             }
 
-        if (av_opt_find(&cc, t->key, NULL, flags, AV_OPT_SEARCH_FAKE_OBJ) ||
-            !codec ||
+        /*2.2 设置选项到ret字典，通常选项走这个if*/
+        if (av_opt_find(&cc, t->key, NULL, flags, AV_OPT_SEARCH_FAKE_OBJ) ||/*在AVCodecContext的AVClass找到该key*/
+            !codec ||   /*该编解码器存在*/
             (codec->priv_class &&
              av_opt_find(&codec->priv_class, t->key, NULL, flags,
-                         AV_OPT_SEARCH_FAKE_OBJ)))
+                         AV_OPT_SEARCH_FAKE_OBJ)))/*codec->priv_class存在且在codec->priv_class找到该key,codec->priv_class是称为cc的子AVClass？有兴趣请看源码*/
             av_dict_set(&ret, t->key, t->value, 0);
         else if (t->key[0] == prefix &&
                  av_opt_find(&cc, t->key + 1, NULL, flags,
-                             AV_OPT_SEARCH_FAKE_OBJ))
+                             AV_OPT_SEARCH_FAKE_OBJ))/*2.3 这个if应该是v:xxx即媒体类型是在冒号前面的。后续可以自行添加对应选项测试即可*/
             av_dict_set(&ret, t->key + 1, t->value, 0);
 
+        // 恢复t->key带有流标识符的值.
+        // 例如b:v，经过上面*p=0后，t->key="b"，这里重置*p=':'，那么就恢复为t->key="b:v"
         if (p)
             *p = ':';
     }
+
     return ret;
 }
 

@@ -99,7 +99,7 @@ typedef struct OptionsContext {
     int64_t start_time;
     int64_t start_time_eof;
     int seek_timestamp;
-    const char *format;                         // -f选项
+    const char *format;                         // -f选项.注：多个-f选项时，只会取最后一个，例如ffmpeg xxx -f s16le -f flv xxx，那么format就是flv
 
     SpecifierOpt *codec_names;                  //offset:40,-vcodec
     int        nb_codec_names;
@@ -151,7 +151,7 @@ typedef struct OptionsContext {
     int64_t stop_time;
     uint64_t limit_filesize;
     float mux_preload;
-    float mux_max_delay;
+    float mux_max_delay;        // -muxdelay选项，在init_options()看到默认0.7
     int shortest;               // -shortest选项
     int bitexact;
 
@@ -164,7 +164,7 @@ typedef struct OptionsContext {
     int   *streamid_map;
     int nb_streamid_map;
 
-    SpecifierOpt *metadata;
+    SpecifierOpt *metadata;     // -metadata选项
     int        nb_metadata;
     SpecifierOpt *max_frames;
     int        nb_max_frames;
@@ -172,7 +172,7 @@ typedef struct OptionsContext {
     int        nb_bitstream_filters;
     SpecifierOpt *codec_tags;
     int        nb_codec_tags;
-    SpecifierOpt *sample_fmts;
+    SpecifierOpt *sample_fmts;  // -sample_fmt选项
     int        nb_sample_fmts;
     SpecifierOpt *qscale;
     int        nb_qscale;
@@ -192,7 +192,7 @@ typedef struct OptionsContext {
     int        nb_chroma_intra_matrices;
     SpecifierOpt *top_field_first;
     int        nb_top_field_first;
-    SpecifierOpt *metadata_map;
+    SpecifierOpt *metadata_map;             // -map_metadata选项
     int        nb_metadata_map;
     SpecifierOpt *presets;
     int        nb_presets;
@@ -237,9 +237,16 @@ typedef struct InputFilter {
     struct InputStream *ist;
     struct FilterGraph *graph;
     uint8_t            *name;
-    enum AVMediaType    type;   // AVMEDIA_TYPE_SUBTITLE for sub2video
+    enum AVMediaType    type;           // AVMEDIA_TYPE_SUBTITLE for sub2video
 
-    AVFifoBuffer *frame_queue;
+    /*
+    typedef struct AVFifoBuffer {
+        uint8_t *buffer;//开辟后的内存起始地址
+        uint8_t *rptr, *wptr, *end;//rptr是指向可读地址，wptr指向可写地址，end指向开辟地址的末尾.初始化后rptr=wptr=buffer；
+        uint32_t rndx, wndx;//初始化后默认都是0
+    } AVFifoBuffer;
+    */
+    AVFifoBuffer *frame_queue;          // 输入过滤器帧队列的大小；初始化时是8帧，av_fifo_alloc(8 * sizeof(AVFrame*))。
 
     // parameters configured for this input
     int format;
@@ -257,9 +264,9 @@ typedef struct InputFilter {
 } InputFilter;
 
 typedef struct OutputFilter {
-    AVFilterContext     *filter;
-    struct OutputStream *ost;
-    struct FilterGraph  *graph;
+    AVFilterContext     *filter;                //
+    struct OutputStream *ost;                   // 输出流
+    struct FilterGraph  *graph;                 // 指向FilterGraph封装的系统过滤器
     uint8_t             *name;
 
     /* temporary storage until stream maps are processed */
@@ -267,17 +274,19 @@ typedef struct OutputFilter {
     enum AVMediaType     type;
 
     /* desired output stream properties */
-    int width, height;
-    AVRational frame_rate;
-    int format;
-    int sample_rate;
-    uint64_t channel_layout;
+    int width, height;                          // 分辨率，仅视频有效(see /* set the filter output constraints */)
+    AVRational frame_rate;                      // 帧率(see /* set the filter output constraints */)
+    int format;                                 // 视频时：保存着该编码器上下文支持的视频像素格式；
+                                                // 音频时：保存着该编码器上下文支持的音频像素格式；初始化时为-1.(see /* set the filter output constraints */)
+
+    int sample_rate;                            // 采样率，仅音频有效
+    uint64_t channel_layout;                    // 通道布局，仅音频有效
 
     // those are only set if no format is specified and the encoder gives us multiple options
     // 只有在没有指定格式并且编码器提供多个选项的情况下才会设置这些选项
-    int *formats;
-    uint64_t *channel_layouts;
-    int *sample_rates;
+    int *formats;                               // 与format实际是一样的，不过有两个不同点：1.这里的内容是从编码器中获取；2.保存的是数组.
+    uint64_t *channel_layouts;                  // 通道布局数组，仅音频有效
+    int *sample_rates;                          // 采样率数组，仅音频有效
 } OutputFilter;
 
 typedef struct FilterGraph {
@@ -357,7 +366,7 @@ typedef struct InputStream {
 
     /* decoded data from this stream goes into all those filters
      * currently video and audio only */
-    InputFilter **filters;
+    InputFilter **filters;                      // 对比输出流OutputStream可以看到，输入流可以有多个输入过滤器，因为输出流的filters是一级指针，而这里输入流是二级指针
     int        nb_filters;
 
     int reinit_filters;
@@ -447,7 +456,7 @@ typedef struct OutputStream {
     int index;               /* stream index in the output file */
     int source_index;        /* InputStream index */
     AVStream *st;            /* stream in the output file */
-    int encoding_needed;     /* true if encoding needed for this stream */
+    int encoding_needed;     /* true if encoding needed for this stream *///是否需要编码；0=不需要 1=需要
     int frame_number;
     /* input pts and corresponding output pts
        for A/V sync */
@@ -460,15 +469,15 @@ typedef struct OutputStream {
     int64_t last_mux_dts;
     // the timebase of the packets sent to the muxer
     AVRational mux_timebase;
-    AVRational enc_timebase;
+    AVRational enc_timebase;    // 由OptionsContext.enc_time_bases参数解析得到
 
     int                    nb_bitstream_filters;
     AVBSFContext            **bsf_ctx;
 
-    AVCodecContext *enc_ctx;
+    AVCodecContext *enc_ctx;    // 通过enc创建的编码器上下文
     AVCodecParameters *ref_par; /* associated input codec parameters with encoders options applied */
-    AVCodec *enc;
-    int64_t max_frames;
+    AVCodec *enc;               // 通过choose_encoder得到的编码器
+    int64_t max_frames;         // 通过OptionsContext.max_frames得到
     AVFrame *filtered_frame;
     AVFrame *last_frame;
     int last_dropped;
@@ -477,14 +486,14 @@ typedef struct OutputStream {
     void  *hwaccel_ctx;
 
     /* video only */
-    AVRational frame_rate;
+    AVRational frame_rate;              // 帧率
     int is_cfr;
     int force_fps;
     int top_field_first;
     int rotate_overridden;
     double rotate_override_value;
 
-    AVRational frame_aspect_ratio;
+    AVRational frame_aspect_ratio;      // 对应OptionsContext.frame_aspect_ratios
 
     /* forced key frames */
     int64_t forced_kf_ref_pts;
@@ -500,21 +509,21 @@ typedef struct OutputStream {
     int audio_channels_mapped;           /* number of channels in audio_channels_map */
 
     char *logfile_prefix;
-    FILE *logfile;
+    FILE *logfile;                      // 日志文件句柄
 
-    OutputFilter *filter;
-    char *avfilter;
-    char *filters;         ///< filtergraph associated to the -filter option
-    char *filters_script;  ///< filtergraph script associated to the -filter_script option
+    OutputFilter *filter;               // 指向输出过滤器
+    char *avfilter;                     // 最终保存filters或者filters_script中过滤器描述的内容
+    char *filters;         ///< filtergraph associated to the -filter option//与-filter选项相关联的Filtergraph
+    char *filters_script;  ///< filtergraph script associated to the -filter_script option//与-filter_script选项相关联的Filtergraph脚本
 
-    AVDictionary *encoder_opts;
+    AVDictionary *encoder_opts;         // 保存着用户指定输出的编码器选项
     AVDictionary *sws_dict;
     AVDictionary *swr_opts;
     AVDictionary *resample_opts;
     char *apad;
-    OSTFinished finished;        /* no more packets should be written for this stream */
-    int unavailable;                     /* true if the steram is unavailable (possibly temporarily) */
-    int stream_copy;
+    OSTFinished finished;               /* no more packets should be written for this stream */
+    int unavailable;                    /* true if the steram is unavailable (possibly temporarily) */
+    int stream_copy;                    // 是否不转码输出，例如-vcodec copy选项.0=转码 1=不转码.只要置为0，音视频都会进入转码的流程。see choose_encoder()
 
     // init_output_stream() has been called for this stream
     // The encoder and the bitstream filters have been initialized and the stream
@@ -524,8 +533,8 @@ typedef struct OutputStream {
     int inputs_done;
 
     const char *attachment_filename;
-    int copy_initial_nonkeyframes;
-    int copy_prior_start;
+    int copy_initial_nonkeyframes;      // 对应OptionsContext.copy_initial_nonkeyframes
+    int copy_prior_start;               // 对应OptionsContext.copy_prior_start
     char *disposition;
 
     int keep_pix_fmt;
@@ -567,20 +576,22 @@ typedef struct OutputFile {
     int header_written;
 } OutputFile;
 
-// 二维数组，用于保存每一个InputStream *输入文件里面的各个流，例如保存了视频流+音频流
-// 那么input_streams[0]、input_streams[1]就是对应音视频流的信息
-extern InputStream **input_streams;
-extern int        nb_input_streams;// input_streams二维数组大小
-extern InputFile   **input_files;  // 用于保存多个输入文件
-extern int        nb_input_files;  // 输入文件个数
 
-extern OutputStream **output_streams;
-extern int         nb_output_streams;
-extern OutputFile   **output_files;// 用于保存多个输出文件
-extern int         nb_output_files;// 输出文件个数
+extern InputStream **input_streams;         /*二维数组，用于保存每一个InputStream *输入文件里面的各个流，例如保存了视频流+音频流
+那么input_streams[0]、input_streams[1]就是对应音视频流的信息*/
+extern int        nb_input_streams;         // input_streams二维数组大小
 
-extern FilterGraph **filtergraphs;
-extern int        nb_filtergraphs;
+extern InputFile   **input_files;           // 用于保存多个输入文件
+extern int        nb_input_files;           // 输入文件个数
+
+extern OutputStream **output_streams;       // 保存各个输出流的数组
+extern int         nb_output_streams;       // output_streams二维数组大小
+
+extern OutputFile   **output_files;         // 用于保存多个输出文件
+extern int         nb_output_files;         // 输出文件个数
+
+extern FilterGraph **filtergraphs;          // 封装好的系统过滤器数组，每个FilterGraph都会包含对应输入流与输出流的的输入输出过滤器。可看init_simple_filtergraph函数
+extern int        nb_filtergraphs;          // filtergraphs数组的大小
 
 extern char *vstats_filename;
 extern char *sdp_filename;
