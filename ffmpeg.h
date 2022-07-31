@@ -453,8 +453,13 @@ typedef enum {
 
 typedef struct OutputStream {
     int file_index;          /* file index */
-    int index;               /* stream index in the output file */
-    int source_index;        /* InputStream index */
+    int index;               /* stream index in the output file */// 由oc->nb_streams - 1得到,输出流的下标
+    int source_index;        /* InputStream index *///对应输入流的下标
+                             /*这里说明一下，index与source_index是不一样的，前者是输出流的下标，一般是按顺序递增的。例如
+                              由于在open_output_file的if (!o->nb_stream_maps)流程，输出视频流总是优先new，
+                              所以输出视频流的index可以说是0，而此时若输入文件的视频流假设是1，那么source_index就是1.
+                              这就是两者的区别*/
+
     AVStream *st;            /* stream in the output file */
     int encoding_needed;     /* true if encoding needed for this stream *///是否需要编码；0=不需要 1=需要
     int frame_number;

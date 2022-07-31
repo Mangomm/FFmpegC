@@ -1281,7 +1281,8 @@ static int open_input_file(OptionsContext *o, const char *filename)
         AVDictionary **opts = setup_find_stream_info_opts(ic, o->g->codec_opts);
         int orig_nb_streams = ic->nb_streams;
 
-        /*avformat_find_stream_info这里最终应用解码器选项o->g->codec_opts？*/
+        /*avformat_find_stream_info这里会用到解码器选项o->g->codec_opts，因为opts就是从
+        o->g->codec_opts过滤得到的*/
         /* If not enough info to get the stream parameters, we decode the
            first frames to get it. (used in mpeg case for example) */
         ret = avformat_find_stream_info(ic, opts);
@@ -1355,6 +1356,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
     /* update the current parameters so that they match the one of the input stream */
     // 7. 将输入文件的每个流封装到InputStream中。InputStream->st是直接指向输入文件的AVStream的，不会再开辟内存.
     // 执行完该函数后，输入文件中各个流就会被保存到input_streams**这个二维数组
+    // (ic->streams[]与input_streams都保存这输入文件的各个输入流)
     add_input_streams(o, ic);
 
     /* dump the file content */
@@ -1389,8 +1391,12 @@ static int open_input_file(OptionsContext *o, const char *filename)
 
     /*9.检测所有编解码器选项是否已经被使用(看open_output_file)*/
     /* check if all codec options have been used */
-    // 因输入文件一般很少设置编解码器选项， 这里可以后续读者自行研究，不难
-    unused_opts = strip_specifiers(o->g->codec_opts);
+    // 因输入文件一般很少设置编解码器选项， 这里可以后续读者自行研究，看懂意思就行，不难
+    unused_opts = strip_specifiers(o->g->codec_opts);// 将用户输入的参数去掉流分隔符
+    /*这里意思是：因为在add_input_streams时，内部已经将用户输入的参数过滤后，匹配给对应的流(一般情
+     * 况各个输入流中都保存一份o->g->codec_opts副本)，所以这里根据各个输入流保存的选项，去清除用户实际
+     * 输入的选项unused_opts，当发现unused_opts还有选项时，那么该选项就是未使用的。
+    */
     for (i = f->ist_index; i < nb_input_streams; i++) {
         e = NULL;
         while ((e = av_dict_get(input_streams[i]->decoder_opts, "", e,
@@ -1398,6 +1404,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
             av_dict_set(&unused_opts, e->key, NULL, 0);
     }
 
+    /*这个while就是对多余的选项进行一些警告处理*/
     e = NULL;
     while ((e = av_dict_get(unused_opts, "", e, AV_DICT_IGNORE_SUFFIX))) {
         const AVClass *class = avcodec_get_class();// 获取编解码器的AVClass
@@ -1492,7 +1499,7 @@ static int get_preset_file_2(const char *preset_name, const char *codec_name, AV
 }
 
 /**
- * @brief 选择编码器
+ * @brief 选择编码器，找到编码器最终保存在ost->enc中
  * @param o 保存着用户命令行的参数上下文
  * @param s 输出文件上下文
  * @param ost ffmpeg封装的输出流
@@ -1525,7 +1532,7 @@ static int choose_encoder(OptionsContext *o, AVFormatContext *s, OutputStream *o
         } else if (!strcmp(codec_name, "copy"))/*2.2用户指定不转码*/
             ost->stream_copy = 1;
         else {
-            /*2.3指定解码器，则使用find_codec_or_die查找，找不到会直接退出程序*/
+            /*2.3指定编解码器，则使用find_codec_or_die查找，找不到会直接退出程序*/
             ost->enc = find_codec_or_die(codec_name, ost->st->codecpar->codec_type, 1);
             ost->st->codecpar->codec_id = ost->enc->id;
         }
@@ -1572,14 +1579,14 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
         exit_program(1);
     output_streams[nb_output_streams - 1] = ost;// 给一级指针赋值
 
-    // 给OutputStream赋值
+    /*2.给OutputStream相关成员赋值*/
     ost->file_index = nb_output_files - 1;//这里有机会可以试试多个输出时，debug file_index的值
     ost->index      = idx;// 使用流下标赋值
     ost->st         = st;
     ost->forced_kf_ref_pts = AV_NOPTS_VALUE;
     st->codecpar->codec_type = type;
 
-    /*2.寻找编码器*/
+    /*3.寻找编码器*/
     ret = choose_encoder(o, oc, ost);
     if (ret < 0) {
         av_log(NULL, AV_LOG_FATAL, "Error selecting an encoder for stream "
@@ -1587,7 +1594,7 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
         exit_program(1);
     }
 
-    /*3.开辟编码器上下文*/
+    /*4.开辟编码器上下文*/
     ost->enc_ctx = avcodec_alloc_context3(ost->enc);
     if (!ost->enc_ctx) {
         av_log(NULL, AV_LOG_ERROR, "Error allocating the encoding context.\n");
@@ -1595,13 +1602,14 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
     }
     ost->enc_ctx->codec_type = type;
 
-    /*给编码器相关参数开辟空间*/
+    /*5.给OutputStream中的编码器相关参数开辟空间*/
     ost->ref_par = avcodec_parameters_alloc();
     if (!ost->ref_par) {
         av_log(NULL, AV_LOG_ERROR, "Error allocating the encoding parameters.\n");
         exit_program(1);
     }
 
+    /*6.从o->g->codec_opts过滤选项，保存到OutputStream的encoder_opts中*/
     if (ost->enc) {
         AVIOContext *s = NULL;
         char *buf = NULL, *arg = NULL, *preset = NULL;
@@ -1644,6 +1652,7 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
         printf("tyytest, t->key: %s, t->value: %s\n", t->key, t->value);
     }
 
+    /*7.这里到函数结尾都是给OutputStream相关成员赋值*/
     if (o->bitexact)
         ost->enc_ctx->flags |= AV_CODEC_FLAG_BITEXACT;
 
@@ -2511,7 +2520,8 @@ static int open_output_file(OptionsContext *o, const char *filename)
     of->start_time     = o->start_time;
     of->limit_filesize = o->limit_filesize;
     of->shortest       = o->shortest;               // -shortest选项
-    av_dict_copy(&of->opts, o->g->format_opts, 0);  // 解复用选项
+    av_dict_copy(&of->opts, o->g->format_opts, 0);  // 解复用选项.这里看到输出会保留一份解复用字典，
+                                                    // 而输入直接在avformat_open_input就使用，不会保存到InputFile
 
     if (!strcmp(filename, "-"))
         filename = "pipe:";
@@ -2622,7 +2632,7 @@ static int open_output_file(OptionsContext *o, const char *filename)
                 // 5000000*!!(ist->st->disposition & AV_DISPOSITION_DEFAULT)意思：含有AV_DISPOSITION_DEFAULT，取值5000000；不含，取值0.
                 new_area = ist->st->codecpar->width * ist->st->codecpar->height + 100000000*!!ist->st->codec_info_nb_frames
                            + 5000000*!!(ist->st->disposition & AV_DISPOSITION_DEFAULT);/*new_area的作用与音频的score一样，请看下面音频的解释*/
-                if (ist->user_set_discard == AVDISCARD_ALL)// 音频一般设置了AVDISCARD_ALL，视频不设置
+                if (ist->user_set_discard == AVDISCARD_ALL)// 若用户要丢弃该输入流，那么输出流则跳过不处理
                     continue;
 
                 // 非音频图片，但开头包含一张附属图？
@@ -2640,7 +2650,7 @@ static int open_output_file(OptionsContext *o, const char *filename)
                 auto tyycode3 =  (('A') | (('P') << 8) | (('I') << 16) | ((unsigned)('C') << 24));*/
                 if (ist->st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
                     new_area > area) {
-                    // 音频图片，且不包含附属图
+                    // 音频图片，且不包含附属图？(这种特殊的视频比较少见，大家可以自行研究)
                     if((qcr==MKTAG('A', 'P', 'I', 'C')) && !(ist->st->disposition & AV_DISPOSITION_ATTACHED_PIC))
                         continue;
 
@@ -3882,6 +3892,7 @@ int ffmpeg_parse_options(int argc, char **argv)
 
     /* 5. create the complex filtergraphs-创建复杂的过滤图 */
     // 推流模块没用到滤镜，后续再将滤镜相关.
+    // 没用到的话，nb_filtergraphs=0，内部不会没有任何处理
     ret = init_complex_filters();
     if (ret < 0) {
         av_log(NULL, AV_LOG_FATAL, "Error initializing complex filters.\n");
