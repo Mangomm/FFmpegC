@@ -290,16 +290,16 @@ typedef struct OutputFilter {
 } OutputFilter;
 
 typedef struct FilterGraph {
-    int            index;
+    int            index;                       // 过滤器下标.see init_simple_filtergraph()
     const char    *graph_desc;
 
-    AVFilterGraph *graph;
+    AVFilterGraph *graph;                       // 系统过滤器
     int reconfiguration;
 
-    InputFilter   **inputs;
-    int          nb_inputs;
-    OutputFilter **outputs;
-    int         nb_outputs;
+    InputFilter   **inputs;                     // 输入文件过滤器描述，数组
+    int          nb_inputs;                     // inputs数组的个数
+    OutputFilter **outputs;                     // 输出文件过滤器描述，数组
+    int         nb_outputs;                     // outputs数组的个数
 } FilterGraph;
 
 typedef struct InputStream {

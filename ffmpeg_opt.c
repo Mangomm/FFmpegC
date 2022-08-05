@@ -130,6 +130,17 @@ static int ignore_unknown_streams = 0;
 static int copy_unknown_streams = 0;
 static int find_stream_info = 1;
 
+void tyy_print_AVDirnary(AVDictionary *d){
+    if(!d){
+        return;
+    }
+
+    AVDictionaryEntry *t = NULL;
+    while((t = av_dict_get(d, "", t, AV_DICT_IGNORE_SUFFIX))){
+        printf("tyy_print_AVDirnary, t->key: %s, t->value: %s\n", t->key, t->value);
+    }
+}
+
 static void uninit_options(OptionsContext *o)
 {
     const OptionDef *po = options;
@@ -1016,38 +1027,52 @@ static void  add_input_streams(OptionsContext *o, AVFormatContext *ic)
 
 /**
  * @brief 判断是否重写文件。对实时流无效。
+ * @param filename 输出文件名
+ * @return 成功=0，代表输出文件可以重写。失败=程序退出
+ *
+ * @note 该函数很简单，就是用于判断文件是否重写，只要函数能返回，
+ *          就代表该输出文件可以重写。重写即重新创建文件是在调用该函数后，在调
+ *          用avio_open2完成的。
+ * 并且注意，重写是指输出文件，而不是输入文件。
 */
 static void assert_file_overwrite(const char *filename)
 {
-    // 获取协议名字，例如rtmp://xxx，那么proto_name="rtmp"
+    // 1. 获取协议名字，例如rtmp://xxx，那么proto_name="rtmp"
     const char *proto_name = avio_find_protocol_name(filename);
 
-    // -y以及-n都提供，程序退出
+    // 2. -y以及-n都提供，程序退出
     if (file_overwrite && no_file_overwrite) {
         fprintf(stderr, "Error, both -y and -n supplied. Exiting.\n");
         exit_program(1);
     }
 
+    /* 3.若没指定-y且-n也没指定，那么会使用avio_check判断该文件是否存在，若存在会在终端询问用户是否重写，
+         用户输入y代表重写，那么该函数返回后会在avio_open2将该文件重新创建。
+         指定了-y，那么直接跳过判断，说明可以直接写了.
+    */
     /*
     * avio_check：返回AVIO_FLAG_*访问标志，对应url中资源的访问权限，失败时返回负值，对应AVERROR代码。
     * 返回的访问标志被flags中的值屏蔽。
     * @note这个函数本质上是不安全的，因为被检查的资源可能会在一次调用到另一次调用时改变它的存在或权限状态。
     * 因此，您不应该信任返回的值，除非您确定没有其他进程正在访问所检查的资源。
+    * 即意思是：你刚好检测完权限，下一秒就被人改掉这个权限了。
+    * 并且笔者测试过，avio_check内部会检测该输出文件是否存在，若存在返回0；不存在返回其它.
     */
     if (!file_overwrite) {
         /*协议存在 且 是文件 且 avio_check(filename, 0) == 0*/
+        //int tyycodeCheck = avio_check(filename, 0);//实时流要注掉，不然会卡主
         if (proto_name && !strcmp(proto_name, "file") && avio_check(filename, 0) == 0) {
             /*若交互模式且没强制不重写文件，会主动询问用户是否要重写文件*/
             if (stdin_interaction && !no_file_overwrite) {
-                fprintf(stderr,"File '%s' already exists. Overwrite ? [y/N] ", filename);
-                fflush(stderr);
+                fprintf(stderr,"File '%s' already exists. Overwrite ? [y/N] ", filename);//在界面提示该字符串
+                fflush(stderr);//清空stderr的缓冲区
                 term_exit();
                 signal(SIGINT, SIG_DFL);
                 if (!read_yesno()) {/*返回0不重写文件；1重写*/
                     av_log(NULL, AV_LOG_FATAL, "Not overwriting - exiting\n");
                     exit_program(1);
                 }
-                term_init();
+                term_init();// 该函数很简单，就是注册相关信号回调函数
             }
             else {
                 av_log(NULL, AV_LOG_FATAL, "File '%s' already exists. Exiting.\n", filename);
@@ -1056,7 +1081,8 @@ static void assert_file_overwrite(const char *filename)
         }
     }
 
-    /*文件，实时流不会进该if*/
+    // 4. 检测输入文件与输出文件名是否一致，若一致则程序退出。一些特定于设备的特殊文件不考虑.
+    /*文件流程，实时流不会进该if*/
     if (proto_name && !strcmp(proto_name, "file")) {
         /*判断每个输入文件是否是特殊的文件*/
         for (int i = 0; i < nb_input_files; i++) {
@@ -1066,7 +1092,7 @@ static void assert_file_overwrite(const char *filename)
              if (file->ctx->iformat->flags & AVFMT_NOFILE)
                  continue;
 
-             if (!strcmp(filename, file->ctx->url)) {/*判断输入的文件名与输入上下文保存的文件名是否一致*/
+             if (!strcmp(filename, file->ctx->url)) {/*判断输出文件名与输入上下文保存的文件名(输入的文件名)是否一致*/
                  av_log(NULL, AV_LOG_FATAL, "Output %s same as Input #%d - exiting\n", filename, i);
                  av_log(NULL, AV_LOG_WARNING, "FFmpeg cannot edit existing files in-place.\n");
                  exit_program(1);
@@ -1990,12 +2016,12 @@ static OutputStream *new_video_stream(OptionsContext *o, AVFormatContext *oc, in
 
     /*过滤器相关*/
     /*对应参数"filter_script"和"filter"*/
-    MATCH_PER_STREAM_OPT(filter_scripts, str, ost->filters_script, oc, st);
+    MATCH_PER_STREAM_OPT(filter_scripts, str, ost->filters_script, oc, st);//new_audio_stream也会调用到
     MATCH_PER_STREAM_OPT(filters,        str, ost->filters,        oc, st);
     if (o->nb_filters > 1)
         av_log(NULL, AV_LOG_ERROR, "Only '-vf %s' read, ignoring remaining -vf options: Use ',' to separate filters\n", ost->filters);
 
-    /*用户没有输入-xxx copy不转码，那么就转码*/
+    /*2.用户没有输入-xxx copy不转码，那么就转码*/
     if (!ost->stream_copy) {
         const char *p = NULL;
         char *frame_size = NULL;
@@ -2193,7 +2219,7 @@ static OutputStream *new_video_stream(OptionsContext *o, AVFormatContext *oc, in
         MATCH_PER_STREAM_OPT(copy_initial_nonkeyframes, i, ost->copy_initial_nonkeyframes, oc ,st);
     }
 
-    /*不转码流程*/
+    /*3.不转码流程*/
     if (ost->stream_copy)
         check_streamcopy_filters(o, oc, ost, AVMEDIA_TYPE_VIDEO);
 
@@ -2233,6 +2259,7 @@ static OutputStream *new_audio_stream(OptionsContext *o, AVFormatContext *oc, in
         /*-ac通道号选项*/
         MATCH_PER_STREAM_OPT(audio_channels, i, audio_enc->channels, oc, st);
 
+        /*-sample_fmt采样格式选项，例如s16p*/
         MATCH_PER_STREAM_OPT(sample_fmts, str, sample_fmt, oc, st);
         if (sample_fmt &&
             (audio_enc->sample_fmt = av_get_sample_fmt(sample_fmt)) == AV_SAMPLE_FMT_NONE) {
@@ -2507,7 +2534,7 @@ static int open_output_file(OptionsContext *o, const char *filename)
         }
     }
 
-    /*为一个输出文件开辟内存*/
+    /*1.为一个输出文件开辟内存，并进行一些必要的初始化*/
     GROW_ARRAY(output_files, nb_output_files);// 开辟sizeof(OutputFile*)大小的内存，nb_output_files自动+1
     of = av_mallocz(sizeof(*of));//开辟OutputFile结构体
     if (!of)
@@ -2526,7 +2553,7 @@ static int open_output_file(OptionsContext *o, const char *filename)
     if (!strcmp(filename, "-"))
         filename = "pipe:";
 
-    // 1. 给输出文件开辟解复用上下文.
+    // 2. 给输出文件开辟解复用上下文.
     // o->format就是-f选项的值,例如-f flv，那么o->format="flv"
     err = avformat_alloc_output_context2(&oc, NULL, o->format, filename);
     if (!oc) {
@@ -2562,7 +2589,7 @@ static int open_output_file(OptionsContext *o, const char *filename)
         oc->flags    |= AVFMT_FLAG_BITEXACT;
     }
 
-    /* create streams for all unlabeled output pads */
+    /* 3. create streams for all unlabeled output pads */
     /* 滤镜相关.
         参数"filter", "filter_script", "reinit_filter", "filter_complex",
         "lavfi", "filter_complex_script"会涉及到此处处理*/
@@ -2584,7 +2611,7 @@ static int open_output_file(OptionsContext *o, const char *filename)
         }
     }
 
-    /*对应参数"-map"*/
+    /*4.对应参数"-map".*/
     /*1.不传map参数时，默认nb_stream_maps=0，传时，则不为0*/
     /*例如-y -i 1.mkv -map 0:0 -map 0:1 -map 0:2 -c:v libx264 -c:a:0 aac -b:a:0 128k -c:s mov_text map.mp4
     备注，mp4不支持ass、srt这些类型的字幕，需要转成mov_text，不想转则将输出格式mp4换成mkv即可.*/
@@ -2594,7 +2621,7 @@ static int open_output_file(OptionsContext *o, const char *filename)
 
         /* pick the "best" stream of each type */
 
-        /*1.若存在多个输入视频流，则选择一个最好的视频流，来创建新的输出视频流*/
+        /*4.1. 若存在多个输入视频流，则选择一个最好的视频流，来创建新的输出视频流*/
         /* video: highest resolution */
         // 没有禁用视频，那么就去猜测编解码器id,依赖oc->oformat->name(-f参数，例如flv)以及文件名，且猜测的id不能是AV_CODEC_ID_NONE.
         // 视频通过av_guess_codec处理后，看源码得出，视频一般返回的是AVOutputFormat->video_codec
@@ -2602,24 +2629,13 @@ static int open_output_file(OptionsContext *o, const char *filename)
             int area = 0, idx = -1;
             /*
              * 测试给定的容器是否可以存储该编解码器(该函数不用看源码，虽然不复杂，但是有回调函数的判断，且该函数意思可以直接看懂)。
-             * @param ofmt 容器检查兼容性
+             * @param ofmt 用来检查兼容性的容器
              * @param codec_id 可能存储在容器中的编解码器
              * @param std_compliance 标准遵从级别，FF_COMPLIANCE_*之一
              * @return 如果codec_id的编解码器可以存储在ofmt中，则返回1，如果不能，则返回0。如果该信息不可用，则为负数。
             */
             int qcr = avformat_query_codec(oc->oformat, oc->oformat->video_codec, 0);
 
-            /*
-             * 关于下面'A''P''I''C'与AV_DISPOSITION_ATTACHED_PIC宏简单说明：
-             * 是否能new_video_stream，实际上与这两个有关，而这两个选项无非是2x2=4中可能.
-             * qcr=APIC,存在宏(1)
-             * qcr=APIC,不存在宏(2)
-             * qcr!=APIC,存在宏(3)
-             * qcr!=APIC,不存在宏(4)
-             * (1)(3)(4)都可以。注意，这些判断都是以codec_type为视频类型说明的。
-             * 这里我们就考虑正常视频流程即可，对于'A''P''I''C'与AV_DISPOSITION_ATTACHED_PIC宏(应该指一种只有开头一帧图片的特殊视频流，后续都是音频)，
-             * 可由读者自行找对应的文件进行debug.
-            */
             for (i = 0; i < nb_input_streams; i++) {
                 int new_area;
                 ist = input_streams[i];
@@ -2635,22 +2651,17 @@ static int open_output_file(OptionsContext *o, const char *filename)
                 if (ist->user_set_discard == AVDISCARD_ALL)// 若用户要丢弃该输入流，那么输出流则跳过不处理
                     continue;
 
-                // 非音频图片，但开头包含一张附属图？
+                // 包含附属图，new_area标记为1
+                // 在这里qcr肯定不等于MKTAG('A', 'P', 'I', 'C')
                 if((qcr!=MKTAG('A', 'P', 'I', 'C')) && (ist->st->disposition & AV_DISPOSITION_ATTACHED_PIC))
                     new_area = 1;
 
                 /* MKTAG宏示例：
-                 * ascii码：'A'=65,'P'=80,'I'=73,'C'=67
+                 * ascii码：'A'=65,'P'=80,'I'=73,'C'=67*/
                 // 01000001 | (01010000 << 8) | (01001001 << 16) | (01000011 << 24)
-                // 0100 0001 | 0101 0000 0000 0000 | 0100 1001 0000 0000 0000 0000 | 0100 0011 0000 0000 0000 0000 0000 0000 =
-                // 0101 0000 0100 0001 | 0100 1001 0000 0000 0000 0000 | 0100 0011 0000 0000 0000 0000 0000 0000 =
-                // 0100 1001 0101 0000 0100 0001 | 0100 0011 0000 0000 0000 0000 0000 0000 =
-                // 0100 0011 0100 1001 0101 0000 0100 0001 = 1128878145
-                auto tyycode2 = MKTAG('A', 'P', 'I', 'C');
-                auto tyycode3 =  (('A') | (('P') << 8) | (('I') << 16) | ((unsigned)('C') << 24));*/
                 if (ist->st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
                     new_area > area) {
-                    // 音频图片，且不包含附属图？(这种特殊的视频比较少见，大家可以自行研究)
+                    // 这里qcr必定不等于MKTAG('A', 'P', 'I', 'C')，故不会进入(这种特殊的视频比较少见，大家可以自行研究)
                     if((qcr==MKTAG('A', 'P', 'I', 'C')) && !(ist->st->disposition & AV_DISPOSITION_ATTACHED_PIC))
                         continue;
 
@@ -2665,7 +2676,7 @@ static int open_output_file(OptionsContext *o, const char *filename)
 
         }//<== if (!o->video_disable && av_guess_codec(oc->oformat, NULL, filename, NULL, AVMEDIA_TYPE_VIDEO) != AV_CODEC_ID_NONE) end ==>
 
-        /*2.若存在多个输入音频流，则选择一个最好的音频流，来创建新的输出音频流*/
+        /*4.2. 若存在多个输入音频流，则选择一个最好的音频流，来创建新的输出音频流*/
         /*进入这里要把-an去掉(输入输出文件都去掉)，且输入文件要有音频*/
         /* audio: most channels */
         enum AVCodecID tyycode1 = av_guess_codec(oc->oformat, NULL, filename, NULL, AVMEDIA_TYPE_AUDIO);//例如0X15001是AV_CODEC_ID_MP3
@@ -2700,18 +2711,19 @@ static int open_output_file(OptionsContext *o, const char *filename)
         /*所以经过上面两步，ffmpeg为你选择了最好的视频流+音频流来创建输出文件*/
 
 
+        /*4.3. 为字幕流开辟输出流，若存在多个字幕流，ffmpeg只会取第一个字幕流*/
         /*字幕相关只是简单分析，不会深入研究*/
-        /* subtitles: pick first */
-        /*获取用户指定的字幕编解码器名字.ffmpeg支持的编解码器可以看 https://qa.1r1g.com/sf/ask/236411031/
-        注，ffmpeg只会列出所有，不能单独查看字幕，不过可以看到提示，第三个字幕是S的是字幕的编解码器，例如D.S...，ass，代表字幕解码支持ass*/
+        /* subtitles: pick first(选择第一个字幕流) */
+        /*获取用户指定的字幕编解码器名字*/
         MATCH_PER_TYPE_OPT(codec_names, str, subtitle_codec_name, oc, "s");
         AVCodec * tyycodeSc = avcodec_find_encoder(oc->oformat->subtitle_codec);
         /*这个if条件很简单，1.不管有无字幕，都先判断有无禁用该字幕；2.无禁用，则再判断输入文件是否包含字幕流.*/
         /*这里可以在推流命令基础添加：-scodec text.注意，因为我们推rtmp，-f是指定为flv，而在ffmpeg中的flv是不支持text以外的编解码器，
         所以当你-scodec ass指定字幕编解码器为ass，会报错：Subtitle codec '%s' for stream %d is not compatible with FLV.
         这是笔者从ffmpeg源码分析得出的.
-        不过有个奇怪的点，当用基础推流命令加上-scodec text，vlc有画面输出(没字幕)，但ffplay播放却只能显示音频图，而没画面输出.有兴趣的可以自行看ffplay源码分析.
-        这里是为了使流程往下走*/
+        不过有个奇怪的点，当用基础推流命令加上-scodec text，vlc有画面输出(没字幕)，但ffplay播放rtmp却只能显示音频图，而没画面输出，
+        播flv、hls则没问题，流媒体服务器是srs.
+        笔者找到原因是加上了-scodec text，去掉后ffplay播放重新有画面.根本原因有兴趣的可以自行看ffplay源码分析.这里是为了使流程往下走*/
         if (!o->subtitle_disable && (avcodec_find_encoder(oc->oformat->subtitle_codec) || subtitle_codec_name)) {
             for (i = 0; i < nb_input_streams; i++)
                 /*1.判断该输入流是否字幕流*/
@@ -2733,26 +2745,41 @@ static int open_output_file(OptionsContext *o, const char *filename)
                     if (output_codec)
                         output_descriptor = avcodec_descriptor_get(output_codec->id);
 
-                    /*1.3判断输入以及输出是否具有AV_CODEC_PROP_TEXT_SUB、AV_CODEC_PROP_BITMAP_SUB*/
+                    /*1.3获取输入以及输出的属性，保存到局部变量中*/
+                    /*注，与上这两个宏目的是为了清除其它宏的标志位*/
                     if (input_descriptor)
                         input_props = input_descriptor->props & (AV_CODEC_PROP_TEXT_SUB | AV_CODEC_PROP_BITMAP_SUB);
                     if (output_descriptor)
                         output_props = output_descriptor->props & (AV_CODEC_PROP_TEXT_SUB | AV_CODEC_PROP_BITMAP_SUB);
 
-                    /*1.4用户指定字幕编解码器，且输入文件存在字幕，就会new一个字幕流*/
-                    if (subtitle_codec_name ||
-                        input_props & output_props ||
+                    /*1.4用户指定字幕编解码器(且输入文件存在字幕即上面的if条件)，就会new一个字幕流*/
+                    /* &&、||、!即与或非，相同的逻辑表达式时，求值顺序是从左往右；不同的逻辑运算符时，非最高，然后是&&，再到||*/
+                    /*int a = TRUE && !FALSE;// 1
+                    int a1 = TRUE && (!FALSE);// 1 故通过a、a1的测试得出，当存在&&以及!运算时，!的优先级比&&高
+                    int x = TRUE || TRUE && FALSE;// 1
+                    int x1 = TRUE || (TRUE && FALSE);// 1
+                    int x2 = (TRUE || TRUE) && FALSE;// 0 故通过x、x1、x2的测试得出，当存在||以及&&运算时，&&的优先级比||高
+                    */
+                    /*int tyycodeSub = ((subtitle_codec_name || input_props & output_props) ||
+                            ((input_descriptor && output_descriptor) &&
+                            (!input_descriptor->props ||
+                             !output_descriptor->props)));*///等价于下面的if语句.
+
+                    if (subtitle_codec_name ||/*用户指定字幕编解码器*/
+                        input_props & output_props ||/*input_props & output_props代表：它们是否都同时至少具有一个宏AV_CODEC_PROP_TEXT_SUB或者AV_CODEC_PROP_BITMAP_SUB*/
                         // Map dvb teletext which has neither property to any output subtitle encoder
-                        input_descriptor && output_descriptor &&
+                        input_descriptor && output_descriptor && /*输入输出描述符都存在*/
                         (!input_descriptor->props ||
-                         !output_descriptor->props)) {
+                         !output_descriptor->props))//注意，当output_descriptor为空不会来到这里，所以不会存在段错误
+                    {
                         new_subtitle_stream(o, oc, i);
-                        break;
+                        break;//这里看到，只会拿第一个字幕流
                     }
                 }
         }
 
-        /*暂未研究，且比较少见*/
+        /*4.4 为数据流开辟输出流。若存在输入文件多个数据流，同样会为其开辟相同个数的数据流。
+         * 暂未研究，且比较少见*/
         /* Data only if codec id match */
         if (!o->data_disable ) {
             enum AVCodecID codec_id = av_guess_codec(oc->oformat, NULL, filename, NULL, AVMEDIA_TYPE_DATA);
@@ -2844,8 +2871,8 @@ loop_end:
         }
     }
 
-    /*对应参数"attach"，添加一个附件到输出文件*/
-    /*处理附加文件，暂未研究，读者可自行研究*/
+    /*5. 对应参数"attach"，添加一个附件到输出文件*/
+    /*处理附加文件，推流没用到，暂未研究，读者可自行研究*/
     /* handle attached files */
     for (i = 0; i < o->nb_attachments; i++) {
         AVIOContext *pb;
@@ -2884,7 +2911,9 @@ loop_end:
     }
 
 #if FF_API_LAVF_AVCTX
+    /*6. 若满足一定条件，则为该输出流的编解码器设置flags选项*/
     /*nb_output_streams一般与oc->nb_streams相等*/
+    /*推流没用到，暂未研究*/
     for (i = nb_output_streams - oc->nb_streams; i < nb_output_streams; i++) { //for all streams of this output file(对于该输出文件的所有流)
         AVDictionaryEntry *e;
         ost = output_streams[i];
@@ -2901,7 +2930,7 @@ loop_end:
     }
 #endif
 
-    /*检测，当输出流数为0，且(对(格式不需要任何流)取反)即格式需要流的情况，那么程序退出*/
+    /*7. 检测，当输出流数为0，且(对(格式不需要任何流)取反)即格式需要流的情况，那么程序退出*/
     if (!oc->nb_streams && !(oc->oformat->flags & AVFMT_NOSTREAMS)) {
         av_dump_format(oc, nb_output_files - 1, oc->url, 1);
         av_log(NULL, AV_LOG_ERROR, "Output file #%d does not contain any stream\n", nb_output_files - 1);
@@ -2909,9 +2938,13 @@ loop_end:
     }
 
     /* check if all codec options have been used */
-    /*得到用户输入并且去掉流说明符的字典*/
+    /*8. 得到用户输入并且去掉流说明符的字典*/
     unused_opts = strip_specifiers(o->g->codec_opts);
-    /*遍历每个输出流，利用每个输出流保存的编解码器选项，将用户输入的选项unused_opts设置为空*/
+    /*遍历每个输出流，利用每个输出流保存的编解码器选项，将用户输入的选项unused_opts设置为空
+    因为会在调用以视频为例，new_video_stream的new_output_stream中，看到：
+    ost->encoder_opts  = filter_codec_opts(o->g->codec_opts, ost->enc->id, oc, st, ost->enc);调用，
+    这样每个流都保存了属于自己的编解码器选项。
+    那么，现在，只要将保存的选项去清除用户的选项，就知道用户输入的选项剩余哪些没使用了*/
     for (i = of->ost_index; i < nb_output_streams; i++) {
         e = NULL;
         while ((e = av_dict_get(output_streams[i]->encoder_opts, "", e,
@@ -2919,9 +2952,9 @@ loop_end:
             av_dict_set(&unused_opts, e->key, NULL, 0);
     }
 
-    /*检测用户剩余未使用的选项*/
+    /*9. 检测用户剩余未使用的选项，对剩余的选项进行检测判断忽略该选项或者程序退出*/
     /*实际下面的判断逻辑很简单，1.判断该选项是否是编解码器选项，不是则直接忽略；
-     * 是则再判断是不是解复用选项，是的话，那么也忽略；不是的解复用的话，那么肯定是编解码器选项，且这里是输出流需要编码，
+     * 是则再判断是不是解复用选项，是的话，那么也忽略；是编解码器选项且不是的解复用的话，那么肯定是编解码器选项，且这里是输出流需要编码，
      * 所以继续往下判断，若不是编码选项，则程序退出*/
     e = NULL;
     while ((e = av_dict_get(unused_opts, "", e, AV_DICT_IGNORE_SUFFIX))) {
@@ -2934,11 +2967,11 @@ loop_end:
         /*1.在avcodec的AVClass找不到该选项，则忽略它；
           2.在avcodec的AVClass找到该选项，则看它是否在avformat的AVClass中找到：
                 2.1）若在avformat的AVClass中找到，则忽略；
-                2.2）若在avformat的AVClass中找不到，则往下，。说明是avcodec的AVClass的选项*/
+                2.2）若在avformat的AVClass中找不到，则往下。说明是avcodec的AVClass的选项*/
         if (!option || foption)
             continue;
 
-        /*该选项不是编码选项，程序退出*/
+        /*该选项不是编码选项(换句话说是解码器选项)，程序退出*/
         if (!(option->flags & AV_OPT_FLAG_ENCODING_PARAM)) {
             av_log(NULL, AV_LOG_ERROR, "Codec AVOption %s (%s) specified for "
                    "output file #%d (%s) is not an encoding option.\n", e->key,
@@ -2962,24 +2995,24 @@ loop_end:
     av_dict_free(&unused_opts);
 
     /* set the decoding_needed flags and create simple filtergraphs */
-    /*设置decoing_needed标志并创建简单的过滤器*/
-    /*这个for循环主要工作：判断该输出流是否需要编码，是的话会对该输出流的过滤器进行初始化*/
-    /*1.1遍历输出文件的每个输出流*/
+    /*10. 设置decoing_needed标志并创建简单的过滤器*/
+    /* 这个for循环主要工作：判断每个输出流是否需要编码，是的话会对该输出流的过滤器进行初始化,
+     * 但只能是视频或者音频流*/
+    /*10.1遍历输出文件的每个输出流*/
     for (i = of->ost_index; i < nb_output_streams; i++) {
         OutputStream *ost = output_streams[i];
 
-        /*1.2判断该输出流是否需要重新编码，并且要求该输出流对应的输入流下标>=0*/
+        /*10.2判断该输出流是否需要重新编码，并且要求该输出流对应的输入流下标>=0*/
         if (ost->encoding_needed && ost->source_index >= 0) {
-            /*1.3得到该输出流对应的输入流ist*/
+            /*10.3获取该输出流对应的输入流ist，并标记该输入流需要解码*/
             InputStream *ist = input_streams[ost->source_index];
-            /*1.4标记该输入流需要解码*/
             ist->decoding_needed |= DECODING_FOR_OST;
 
-            /*1.5媒体类型是视频或者音频，需要初始化简单过滤器.
+            /*10.4媒体类型是视频或者音频，需要利用输入输出流初始化简单过滤器.
             所以字幕一般来到这里，但不属于音视频类型，所以字幕不会创建过滤器*/
             if (ost->st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ||
                 ost->st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-                err = init_simple_filtergraph(ist, ost);
+                err = init_simple_filtergraph(ist, ost);/*利用输入输出流创建过滤器*/
                 if (err < 0) {
                     av_log(NULL, AV_LOG_ERROR,
                            "Error initializing a simple filtergraph between streams "
@@ -2990,12 +3023,13 @@ loop_end:
             }
         }
 
-        /*当上面需要初始化过滤器后，这里会利用编码器的参数设置过滤器的输出条件。
+        /*10.5 当上面需要初始化过滤器后，这里会利用编码器的参数设置过滤器的输出条件。
          * 主要是：视频的帧率、分辨率、帧格式；音频的采样格式、采样率、通道布局*/
         /* set the filter output constraints */
         if (ost->filter) {
-            OutputFilter *f = ost->filter;
+            OutputFilter *f = ost->filter;//fg->outputs[0]
             int count;
+            // 下面全是为输出过滤器f赋值的
             switch (ost->enc_ctx->codec_type) {
             case AVMEDIA_TYPE_VIDEO:
                 f->frame_rate = ost->frame_rate;
@@ -3062,7 +3096,7 @@ loop_end:
         }//<== if (ost->filter) end ==>
     }//<== for (i = of->ost_index; i < nb_output_streams; i++) emd ==>
 
-    /*如果需要图像编号，请检查文件名.有兴趣的请看av_filename_number_test源码*/
+    /*11. 如果需要图像编号，请检查文件名.有兴趣的请看av_filename_number_test源码，推流没用到*/
     /* check filename in case of an image number is expected */
     if (oc->oformat->flags & AVFMT_NEEDNUMBER) {
         if (!av_filename_number_test(oc->url)) {
@@ -3071,13 +3105,15 @@ loop_end:
         }
     }
 
-    /*输出需要流 且 输入流为空，程序退出*/
+    /*12. 输出需要流 且 输入流为空，程序退出。
+    input_stream_potentially_available=0代表输入文件没有输入流*/
     if (!(oc->oformat->flags & AVFMT_NOSTREAMS) && !input_stream_potentially_available) {
         av_log(NULL, AV_LOG_ERROR,
                "No input streams but output needs an input stream\n");
         exit_program(1);
     }
 
+    /*13. 判断该输出文件能否重写，若不能程序直接退出；能则将输出文件重置，等待后面的流程输入数据*/
     /*输出文件的AVOutputFormat不包含AVFMT_NOFILE，那么进入if流程(实时流和文件一般都会进入)*/
     /*AVFMT_NOFILE：大概搜了源码以及百度，意思是：指一些特定于设备的特殊文件，
     且AVIOContext表示字节流输入/输出的上下文，在muxers和demuxers的数据成员flags有设置AVFMT_NOFILE时，
@@ -3088,6 +3124,8 @@ loop_end:
 
         /* open the file */
         /*因为没有AVFMT_NOFILE，所以需要调avio_open2给oc->pb赋值*/
+        /*经过assert_file_overwrite断言后，说明用户是认可重写该文件的，那么经过avio_open2处理后，
+        输入文件就会被重新创建，debug此时看到文件变成0KB的大小*/
         if ((err = avio_open2(&oc->pb, filename, AVIO_FLAG_WRITE,
                               &oc->interrupt_callback,
                               &of->opts)) < 0) {
@@ -3103,7 +3141,7 @@ loop_end:
     oc->max_delay = (int)(o->mux_max_delay * AV_TIME_BASE);
 
     /* copy metadata */
-    /*元数据相关，基本很少用到，有兴趣可参考：
+    /*14. copy_metadata()拷贝元数据，推流没用到，有兴趣可参考：
     https://blog.csdn.net/feiyu5323/article/details/118352974以及
     https://www.jianshu.com/p/bd752c86f3e7
     */
@@ -3120,8 +3158,8 @@ loop_end:
                       input_files[in_file_index]->ctx : NULL, o);
     }
 
-    /* copy chapters */
-    /*略，暂不研究*/
+    /* 15. copy chapters */
+    /*推流没用到，暂不研究*/
     if (o->chapters_input_file >= nb_input_files) {
         if (o->chapters_input_file == INT_MAX) {
             /* copy chapters from the first input file that has them*/
@@ -3137,12 +3175,25 @@ loop_end:
             exit_program(1);
         }
     }
+    /*推流没用到，暂不研究*/
     if (o->chapters_input_file >= 0)
         copy_chapters(input_files[o->chapters_input_file], of,
                       !o->metadata_chapters_manual);
 
-    /*这里就是将输入文件的全局元数据拷贝到输出文件的全局元数据*/
+    /*16. 这里就是将输入文件的全局元数据拷贝到输出文件的全局元数据*/
     /* copy global metadata by default */
+    printf("============ global metadata ===========\n");
+    printf("copy before, input_files[0]->ctx->metadata: \n");
+    if(input_files[0]->ctx->metadata)
+        tyy_print_AVDirnary(input_files[0]->ctx->metadata);
+    else
+        printf("input_files[0]->ctx->metadata is null\n");
+
+    printf("copy before, oc->metadata: \n");
+    if(oc->metadata)
+        tyy_print_AVDirnary(oc->metadata);
+    else
+        printf("oc->metadata is null\n");
     if (!o->metadata_global_manual && nb_input_files){
         av_dict_copy(&oc->metadata, input_files[0]->ctx->metadata,
                      AV_DICT_DONT_OVERWRITE);
@@ -3150,7 +3201,13 @@ loop_end:
             av_dict_set(&oc->metadata, "duration", NULL, 0);
         av_dict_set(&oc->metadata, "creation_time", NULL, 0);
     }
-    /*这里就是将输入文件的每一个流的元数据拷贝到输出文件对应每一个流的元数据中*/
+    printf("+++++++++ copy after, input_files[0]->ctx->metadata: \n");
+    tyy_print_AVDirnary(input_files[0]->ctx->metadata);
+    printf("copy after, oc->metadata: \n");
+    tyy_print_AVDirnary(oc->metadata);
+    printf("============ global metadata ===========\n");
+
+    /*17. 这里就是将输入文件的每一个流的元数据拷贝到输出文件对应每一个流的元数据中*/
     if (!o->metadata_streams_manual)
         for (i = of->ost_index; i < nb_output_streams; i++) {
             InputStream *ist;
@@ -3158,15 +3215,35 @@ loop_end:
                 continue;
 
             ist = input_streams[output_streams[i]->source_index];//根据输出流中保存的输入流下标，得到对应的输入流
+
+            printf("============ stream metadata %d ===========\n", i);
+            printf("copy before, ist->st->metadata: \n");
+            if(ist->st->metadata)
+                tyy_print_AVDirnary(ist->st->metadata);
+            else
+                printf("ist->st->metadata is null\n");
+
+            printf("copy before, output_streams[i]->st->metadata: \n");
+            if(output_streams[i]->st->metadata)
+                tyy_print_AVDirnary(output_streams[i]->st->metadata);
+            else
+                printf("output_streams[i]->st->metadata is null\n");
             av_dict_copy(&output_streams[i]->st->metadata, ist->st->metadata, AV_DICT_DONT_OVERWRITE);//就是这里进行拷贝的
 
+            // 拷贝之后应该也要检查是否为空的，这里就不写得这么仔细了
+            printf("+++++++++ copy after, ist->st->metadata: \n");
+            tyy_print_AVDirnary(ist->st->metadata);
+            printf("copy after, output_streams[i]->st->metadata: \n");
+            tyy_print_AVDirnary(output_streams[i]->st->metadata);
+            printf("============ stream metadata %d ===========\n", i);
+
             if (!output_streams[i]->stream_copy) {
-                /*转码则把元数据的encoder删掉？*/
+                /*转码则把元数据的encoder删掉，因为后续会在set_encoder_id()中为每个流增加该选项*/
                 av_dict_set(&output_streams[i]->st->metadata, "encoder", NULL, 0);
             }
         }
 
-    /*暂未研究*/
+    /*18 process manually set programs，推流没用到，暂不研究*/
     /* process manually set programs */
     for (i = 0; i < o->nb_program; i++) {
         const char *p = o->program[i].u.str;
@@ -3237,10 +3314,10 @@ loop_end:
      * 看上面提到的这两篇文章：
       https://blog.csdn.net/feiyu5323/article/details/118352974以及
       https://www.jianshu.com/p/bd752c86f3e7
-      暂不深入研究.
+      推流没用到，暂不研究
       只要我们不考虑元数据(除了必要的拷贝外)，这部分代码基本可以去掉。
     */
-    /* process manually set metadata */
+    /* 19. process manually set metadata */
     for (i = 0; i < o->nb_metadata; i++) {
         AVDictionary **m;
         char type, *val;
@@ -3833,7 +3910,7 @@ static int open_files(OptionGroupList *l, const char *inout,
             return ret;
         }
 
-        // 这里可以看到，推流命令测试中，经过parse_optgroup后，编解码器选项从9个变成11个.
+//        // 这里可以看到，推流命令测试中，经过parse_optgroup后，编解码器选项从9个变成11个.
 //        AVDictionaryEntry *t = NULL;
 //        while((t = av_dict_get(o.g->codec_opts, "", t, AV_DICT_IGNORE_SUFFIX))){
 //            printf("tyytest, t->key: %s, t->value: %s\n", t->key, t->value);

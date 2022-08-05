@@ -3219,6 +3219,7 @@ static void set_encoder_id(OutputFile *of, OutputStream *ost)
     if (!encoder_string)
         exit_program(1);
 
+    //这里会给每一个流增加一个encoder元数据选项
     if (!(format_flags & AVFMT_FLAG_BITEXACT) && !(codec_flags & AV_CODEC_FLAG_BITEXACT))
         av_strlcpy(encoder_string, LIBAVCODEC_IDENT " ", encoder_string_len);
     else
@@ -3226,6 +3227,14 @@ static void set_encoder_id(OutputFile *of, OutputStream *ost)
     av_strlcat(encoder_string, ost->enc->name, encoder_string_len);
     av_dict_set(&ost->st->metadata, "encoder",  encoder_string,
                 AV_DICT_DONT_STRDUP_VAL | AV_DICT_DONT_OVERWRITE);
+
+    {
+        //tyycode
+        AVDictionaryEntry *t = NULL;
+        while((t = av_dict_get(ost->st->metadata, "", t, AV_DICT_IGNORE_SUFFIX))){
+            printf("tyy_print_AVDirnary, t->key: %s, t->value: %s\n", t->key, t->value);
+        }
+    }
 }
 
 static void parse_forced_key_frames(char *kf, OutputStream *ost,
@@ -4987,13 +4996,15 @@ int main(int argc, char **argv)
     }
 
     /* file converter / grab */
-    // 实际上这里ffmpeg不需要判断nb_output_files <= 0，因为上面已经判断了
+    // 这里还是要判断nb_output_files <= 0，因为上面nb_output_files=-1时，不会退出程序
     if (nb_output_files <= 0) {
         av_log(NULL, AV_LOG_FATAL, "At least one output file must be specified\n");
         exit_program(1);
     }
 
+    /*若输出格式不是rtp协议，那么want_sdp=0*/
     for (i = 0; i < nb_output_files; i++) {
+        //例如flv与rtp比较
         if (strcmp(output_files[i]->ctx->oformat->name, "rtp"))
             want_sdp = 0;
     }

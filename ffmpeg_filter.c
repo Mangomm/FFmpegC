@@ -200,17 +200,22 @@ DEF_CHOOSE_FORMAT(channel_layouts, uint64_t, channel_layout, channel_layouts, 0,
  * @param ist 输入流
  * @param ost 与输入流对应的输出流
  * @return 成功=0 失败=程序退出
+ *
+ * @note 这个函数看到，虽然在FilterGraph的成员outputs、inputs都是二级指针，但都是只使用第一个元素，
+ * 即下面看到fg->outputs[0]、fg->inputs[0]都是固定下标0，所以这个函数只被调用一次，实际上ffmpeg
+ * 也是这样调的，读者可以自行搜索，看到该函数只会被调用一次.
 */
 int init_simple_filtergraph(InputStream *ist, OutputStream *ost)
 {
-    /*1.给封装好的系统过滤器开辟内存*/
+    /*1.给封装好的系统过滤器FilterGraph开辟内存*/
     FilterGraph *fg = av_mallocz(sizeof(*fg));
 
     if (!fg)
         exit_program(1);
     fg->index = nb_filtergraphs;
 
-    /*2.开辟一个OutputFilter *指针和开辟一个OutputFilter结构体，并让该指针指向该结构体*/
+    /*2.开辟一个OutputFilter *指针和开辟一个OutputFilter结构体，
+     并让该指针指向该结构体，然后对该结构体进行相关赋值*/
     GROW_ARRAY(fg->outputs, fg->nb_outputs);//开辟OutputFilter *指针
     if (!(fg->outputs[0] = av_mallocz(sizeof(*fg->outputs[0]))))// 开辟一个OutputFilter结构体
         exit_program(1);
@@ -220,7 +225,8 @@ int init_simple_filtergraph(InputStream *ist, OutputStream *ost)
 
     ost->filter = fg->outputs[0];//同样ost中也会保存该OutputFilter.(建议画图容易理解)
 
-    /*3.开辟一个InputFilter *指针和开辟一个InputFilter结构体，并让该指针指向该结构体*/
+    /*3.开辟一个InputFilter *指针和开辟一个InputFilter结构体，
+     并让该指针指向该结构体，然后对该结构体进行相关赋值*/
     GROW_ARRAY(fg->inputs, fg->nb_inputs);
     if (!(fg->inputs[0] = av_mallocz(sizeof(*fg->inputs[0]))))
         exit_program(1);
@@ -237,7 +243,7 @@ int init_simple_filtergraph(InputStream *ist, OutputStream *ost)
     GROW_ARRAY(ist->filters, ist->nb_filters);// 给输入流的过滤器开辟一个指针
     ist->filters[ist->nb_filters - 1] = fg->inputs[0];// 给输入流的过滤器赋值，对比输出流OutputStream可以看到，输入流可以有多个输入过滤器
 
-    /*4.保存fg，其中该fg保存了新开辟的输出过滤器OutputFilter 以及 新开辟的输入过滤器InputFilter*/
+    /*4.保存FilterGraph fg，其中该fg保存了新开辟的输出过滤器OutputFilter 以及 新开辟的输入过滤器InputFilter*/
     GROW_ARRAY(filtergraphs, nb_filtergraphs);
     filtergraphs[nb_filtergraphs - 1] = fg;
 
@@ -700,11 +706,18 @@ int configure_output_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOu
     }
 }
 
+/**
+ * @brief 检查系统过滤器数组中，输出过滤器保存的输出流是否为空.
+ *      可看init_simple_filtergraph函数对FilterGraph **filtergraphs的初始化。
+ * @return 成功=void； 失败=程序退出
+*/
 void check_filter_outputs(void)
 {
     int i;
+    //1. 遍历系统过滤器数组
     for (i = 0; i < nb_filtergraphs; i++) {
         int n;
+        // 2. 遍历系统过滤器数组中的输出过滤器数组
         for (n = 0; n < filtergraphs[i]->nb_outputs; n++) {
             OutputFilter *output = filtergraphs[i]->outputs[n];
             if (!output->ost) {
