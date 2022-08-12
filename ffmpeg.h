@@ -74,7 +74,7 @@ typedef struct HWAccel {
 typedef struct HWDevice {
     const char *name;
     enum AVHWDeviceType type;
-    AVBufferRef *device_ref;
+    AVBufferRef *device_ref;    /*硬件设备引用*/
 } HWDevice;
 
 /* select an input stream for an output stream */
@@ -180,7 +180,7 @@ typedef struct OptionsContext {
     int        nb_forced_key_frames;
     SpecifierOpt *force_fps;
     int        nb_force_fps;
-    SpecifierOpt *frame_aspect_ratios;
+    SpecifierOpt *frame_aspect_ratios;      // -aspect选项
     int        nb_frame_aspect_ratios;
     SpecifierOpt *rc_overrides;
     int        nb_rc_overrides;
@@ -316,7 +316,7 @@ typedef struct InputStream {
     AVFrame *decoded_frame;
     AVFrame *filter_frame; /* a ref of decoded_frame, to be sent to filters */
 
-    int64_t       start;     /* time when read started */
+    int64_t       start;     /* time when read started *///单位微秒
     /* predicted dts of the next packet read for this stream or (when there are
      * several frames in a packet) of the next frame in current packet (in AV_TIME_BASE units) */
     int64_t       next_dts;
@@ -345,7 +345,7 @@ typedef struct InputStream {
     int top_field_first;
     int guess_layout_max;
 
-    int autorotate;
+    int autorotate;                     // 应该与旋转角度有关？
 
     int fix_sub_duration;
     struct { /* previous decoded subtitle and related variables */
@@ -373,7 +373,7 @@ typedef struct InputStream {
 
     /* hwaccel options */
     enum HWAccelID hwaccel_id;                  // 硬件解码器id
-    enum AVHWDeviceType hwaccel_device_type;
+    enum AVHWDeviceType hwaccel_device_type;    // 硬件设备类型
     char  *hwaccel_device;
     enum AVPixelFormat hwaccel_output_format;
 
@@ -406,7 +406,7 @@ typedef struct InputFile {
     AVFormatContext *ctx; // 输入文件的ctx
     int eof_reached;      /* true if eof reached */
     int eagain;           /* true if last read attempt returned EAGAIN */
-    int ist_index;        /* index of first stream in input_streams */
+    int ist_index;        /* index of first stream in input_streams *///输入文件中第一个流的下标,一般为0
     int loop;             /* set number of times input stream should be looped *///循环次数.例如无限次,-stream_loop -1
     int64_t duration;     /* actual duration of the longest stream in a file
                              at the moment when looping happens */
@@ -421,7 +421,7 @@ typedef struct InputFile {
     int nb_streams;       /* number of stream that ffmpeg is aware of; may be different
                              from ctx.nb_streams if new streams appear during av_read_frame() */
     int nb_streams_warn;  /* number of streams that the user was warned of */
-    int rate_emu;
+    int rate_emu;               // -re选项。从OptionsContext.rate_emu得到，用户输入-re选项，rate_emu的值为1
     int accurate_seek;
 
 #if HAVE_THREADS
@@ -461,7 +461,7 @@ typedef struct OutputStream {
                               这就是两者的区别*/
 
     AVStream *st;            /* stream in the output file */
-    int encoding_needed;     /* true if encoding needed for this stream *///是否需要编码；0=不需要 1=需要
+    int encoding_needed;     /* true if encoding needed for this stream *///是否需要编码；0=不需要 1=需要.一般由!stream_copy得到
     int frame_number;
     /* input pts and corresponding output pts
        for A/V sync */
@@ -473,14 +473,16 @@ typedef struct OutputStream {
     /* dts of the last packet sent to the muxer */
     int64_t last_mux_dts;
     // the timebase of the packets sent to the muxer
-    AVRational mux_timebase;
+    AVRational mux_timebase;    // 发送到muxer的数据包的时间基准
     AVRational enc_timebase;    // 由OptionsContext.enc_time_bases参数解析得到
 
-    int                    nb_bitstream_filters;
-    AVBSFContext            **bsf_ctx;
+    int                    nb_bitstream_filters;    // bsf_ctx数组大小.see init_output_bsfs()
+    AVBSFContext            **bsf_ctx;              // 位流数组
 
     AVCodecContext *enc_ctx;    // 通过enc创建的编码器上下文
-    AVCodecParameters *ref_par; /* associated input codec parameters with encoders options applied */
+    AVCodecParameters *ref_par; /* associated input codec parameters with encoders options applied.
+                                 (将输入编解码器参数与应用的编码器选项关联起来)*/
+
     AVCodec *enc;               // 通过choose_encoder得到的编码器
     int64_t max_frames;         // 通过OptionsContext.max_frames得到
     AVFrame *filtered_frame;
@@ -491,7 +493,7 @@ typedef struct OutputStream {
     void  *hwaccel_ctx;
 
     /* video only */
-    AVRational frame_rate;              // 帧率
+    AVRational frame_rate;              // 帧率，由OptionsContext.frame_rates即-r选项得到
     int is_cfr;
     int force_fps;
     int top_field_first;
@@ -502,8 +504,8 @@ typedef struct OutputStream {
 
     /* forced key frames */
     int64_t forced_kf_ref_pts;
-    int64_t *forced_kf_pts;
-    int forced_kf_count;
+    int64_t *forced_kf_pts;             // 强制关键帧pts数组.暂未深入研究
+    int forced_kf_count;                // forced_kf_pts数组大小
     int forced_kf_index;
     char *forced_keyframes;
     AVExpr *forced_keyframes_pexpr;
@@ -533,14 +535,14 @@ typedef struct OutputStream {
     // init_output_stream() has been called for this stream
     // The encoder and the bitstream filters have been initialized and the stream
     // parameters are set in the AVStream.
-    int initialized;
+    int initialized;                    // =1表示init_output_stream()调用完成.see init_output_stream()
 
     int inputs_done;
 
     const char *attachment_filename;
     int copy_initial_nonkeyframes;      // 对应OptionsContext.copy_initial_nonkeyframes
     int copy_prior_start;               // 对应OptionsContext.copy_prior_start
-    char *disposition;
+    char *disposition;                  // 对应OptionsContext.disposition，即-disposition选项
 
     int keep_pix_fmt;
 
@@ -556,10 +558,10 @@ typedef struct OutputStream {
     /* packet quality factor */
     int quality;
 
-    int max_muxing_queue_size;
+    int max_muxing_queue_size;          // 默认最大复用队列的大小为128，new_output_stream时指定
 
     /* the packets are buffered here until the muxer is ready to be initialized */
-    AVFifoBuffer *muxing_queue;
+    AVFifoBuffer *muxing_queue;         // new_output_stream时开辟内存.
 
     /* packet picture type */
     int pict_type;
@@ -570,15 +572,15 @@ typedef struct OutputStream {
 
 typedef struct OutputFile {
     AVFormatContext *ctx;   // 输出文件的解复用上下文
-    AVDictionary *opts;     // 解复用选项
-    int ost_index;       /* index of the first stream in output_streams */
+    AVDictionary *opts;     // 解复用选项，由o->g->format_opts拷贝得到.see open_output_file()
+    int ost_index;          /* index of the first stream in output_streams */
     int64_t recording_time;  ///< desired length of the resulting file in microseconds == AV_TIME_BASE units
     int64_t start_time;      ///< start time in microseconds == AV_TIME_BASE units
     uint64_t limit_filesize; /* filesize limit expressed in bytes */
 
     int shortest;
 
-    int header_written;
+    int header_written;     // =1表示调用avformat_write_header()成功.
 } OutputFile;
 
 

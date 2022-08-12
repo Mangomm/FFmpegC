@@ -121,9 +121,9 @@ const char *const forced_keyframes_const_names[] = {
 };
 
 typedef struct BenchmarkTimeStamps {
-    int64_t real_usec;
-    int64_t user_usec;
-    int64_t sys_usec;
+    int64_t real_usec;          // transcode()调用前的实时时间，see av_gettime_relative().单位微秒
+    int64_t user_usec;          // 进程在用户层消耗的时间.单位微秒
+    int64_t sys_usec;           // 进程在内核层消耗的时间.单位微秒
 } BenchmarkTimeStamps;
 
 static void do_video_stats(OutputStream *ost, int frame_size);
@@ -709,6 +709,13 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
      * reordering, see do_video_out().
      * Do not count the packet when unqueued because it has been counted when queued.
      */
+    /*
+     * 音频编码器可能会分割数据包 --  #输入帧!= #输出包。
+     * 但是没有重新排序，所以我们可以通过简单地将它们放在这里来限制输出数据包的数量。
+     * 由于重新排序，编码的视频帧需要单独计数，参见do_video_out()。
+     * 不要在未排队时计数数据包，因为它在排队时已被计数。
+     */
+    /*1."视频需要编码"以外的类型，且unqueue=0时，会判断是否需要丢包.*/
     if (!(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && ost->encoding_needed) && !unqueue) {
         if (ost->frame_number >= ost->max_frames) {
             av_packet_unref(pkt);
@@ -717,12 +724,18 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
         ost->frame_number++;
     }
 
+    /*2.没有写头或者写头失败的处理*/
     if (!of->header_written) {
         AVPacket tmp_pkt = {0};
-        /* the muxer is not initialized yet, buffer the packet */
-        if (!av_fifo_space(ost->muxing_queue)) {
+        /* the muxer is not initialized yet, buffer the packet(muxer尚未初始化，请缓冲该数据包) */
+        //2.1 fifo没有空间，则给其扩容
+        if (!av_fifo_space(ost->muxing_queue)) {//return f->end - f->buffer - av_fifo_size(f);
+            /*新队列大小求法：若在最大队列大小内，那么以当前队列大小的两倍扩容.
+            例如用户不指定大小，默认是给复用队列先开辟8个空间大小，若此时没空间，说明av_fifo_size()返回的值为8*sizeof(pkt)，
+            那么乘以2后，new_size值就是16个pkt的大小了。*/
             int new_size = FFMIN(2 * av_fifo_size(ost->muxing_queue),
                                  ost->max_muxing_queue_size);
+            /*若输出流的包缓存到达最大复用队列，那么ffmpeg会退出程序*/
             if (new_size <= av_fifo_size(ost->muxing_queue)) {
                 av_log(NULL, AV_LOG_ERROR,
                        "Too many packets buffered for output stream %d:%d.\n",
@@ -2913,12 +2926,26 @@ static int get_buffer(AVCodecContext *s, AVFrame *frame, int flags)
     return avcodec_default_get_buffer2(s, frame, flags);
 }
 
+/**
+ * @brief 两个逻辑：
+ * 1）输入流需要转码：对输入流ist做相关赋值，并调用avcodec_open2()
+ * 2）输入流不需要转码：给pts、next_pts赋AV_NOPTS_VALUE()，这一步转码逻辑同样会执行
+ *
+ * @param ist_index 流下标
+ * @param error 错误描述
+ * @param error_len 错误描述长度
+ *
+ * @return 成功=0； 失败=负数
+*/
 static int init_input_stream(int ist_index, char *error, int error_len)
 {
     int ret;
     InputStream *ist = input_streams[ist_index];
 
+    /*1.输入流需要转码的流程*/
     if (ist->decoding_needed) {
+        /*1.1获取输入流的编解码器.
+         * 解码器在add_input_streams时已经赋值*/
         AVCodec *codec = ist->dec;
         if (!codec) {
             snprintf(error, error_len, "Decoder (codec %s) not found for input stream #%d:%d",
@@ -2926,31 +2953,51 @@ static int init_input_stream(int ist_index, char *error, int error_len)
             return AVERROR(EINVAL);
         }
 
+        /*1.2在add_input_streams对ist赋值的基础上，再对ist相关内容赋值*/
         ist->dec_ctx->opaque                = ist;
         ist->dec_ctx->get_format            = get_format;
         ist->dec_ctx->get_buffer2           = get_buffer;
         ist->dec_ctx->thread_safe_callbacks = 1;
 
+        /*
+         * 在AVCodecContext结构体中对refcounted_frames成员的解释：如果非零，则从avcodec_decode_video2()和avcodec_decode_audio4()返回的解码音
+         * 频和视频帧是引用计数的，并且无限期有效。当它们不再需要时，调用者必须使用av_frame_unref()释放它们。否则，解码的帧一定不能被调用方释放，
+         * 并且只有在下一次解码调用之前才有效。如果使用了avcodec_receive_frame()，这将总是自动启用。
+         * -编码:未使用。
+         * -解码:由调用者在avcodec_open2()之前设置。
+        */
         av_opt_set_int(ist->dec_ctx, "refcounted_frames", 1, 0);
-        if (ist->dec_ctx->codec_id == AV_CODEC_ID_DVB_SUBTITLE &&
-           (ist->decoding_needed & DECODING_FOR_OST)) {
+
+        if (ist->dec_ctx->codec_id == AV_CODEC_ID_DVB_SUBTITLE &&/*dvb字幕类型*/
+           (ist->decoding_needed & DECODING_FOR_OST)) {/*该输出流需要重新编码,open_output_file有：ist->decoding_needed |= DECODING_FOR_OST*/
+            /*为dvb字幕设置compute_edt选项，该选项搜compute_edt源码看到，它作用是: 使用pts或timeout计算时间结束.
+            AV_DICT_DONT_OVERWRITE：若存在该key，则不覆盖已有的value*/
             av_dict_set(&ist->decoder_opts, "compute_edt", "1", AV_DICT_DONT_OVERWRITE);
             if (ist->decoding_needed & DECODING_FOR_FILTER)
                 av_log(NULL, AV_LOG_WARNING, "Warning using DVB subtitles for filtering and output at the same time is not fully supported, also see -compute_edt [0|1]\n");
         }
 
+        /*默认输入文件的字幕类型为ass？*/
         av_dict_set(&ist->decoder_opts, "sub_text_format", "ass", AV_DICT_DONT_OVERWRITE);
 
         /* Useful for subtitles retiming by lavf (FIXME), skipping samples in
-         * audio, and video decoders such as cuvid or mediacodec */
+         * audio, and video decoders such as cuvid or mediacodec.
+         * (适用于由lavf (FIXME)重定时的字幕，跳过音频和视频解码器，如cuvid或mediacodec)
+         * 例如1.mkv，ist->st->time_base={1,1000}
+        */
         ist->dec_ctx->pkt_timebase = ist->st->time_base;
 
+        /*若用户没指定threads选项，则默认"auto"*/
         if (!av_dict_get(ist->decoder_opts, "threads", NULL, 0))
             av_dict_set(&ist->decoder_opts, "threads", "auto", 0);
-        /* Attached pics are sparse, therefore we would not want to delay their decoding till EOF. */
+        /* Attached pics are sparse, therefore we would not want to delay their decoding till EOF.
+         * (附件中的图片是稀少的，因此我们不想将它们的解码延迟到EOF)
+         * 附属图片，则threads重设为1.
+        */
         if (ist->st->disposition & AV_DISPOSITION_ATTACHED_PIC)
             av_dict_set(&ist->decoder_opts, "threads", "1", 0);
 
+        /*1.3对输入流的硬件相关处理.后续再详细研究*/
         ret = hw_device_setup_for_decode(ist);
         if (ret < 0) {
             snprintf(error, error_len, "Device setup failed for "
@@ -2959,6 +3006,8 @@ static int init_input_stream(int ist_index, char *error, int error_len)
             return ret;
         }
 
+        /*1.4编解码器上下文与编解码器关联.
+        这里看到，编解码器的相关选项是在这里被应用的*/
         if ((ret = avcodec_open2(ist->dec_ctx, codec, &ist->decoder_opts)) < 0) {
             if (ret == AVERROR_EXPERIMENTAL)
                 abort_codec_experimental(codec, 0);
@@ -2969,15 +3018,25 @@ static int init_input_stream(int ist_index, char *error, int error_len)
                      ist->file_index, ist->st->index, av_err2str(ret));
             return ret;
         }
+
+        /*1.5检测是否含有多余的选项.
+        当avcodec_open2成功打开后，若decoder_opts包含未知选项，会返回在decoder_opts中，
+        所以此时decoder_opts只要有一个选项，就说明是非法的*/
         assert_avoptions(ist->decoder_opts);
     }
 
+    /*2.输入流不需要转码的流程*/
     ist->next_pts = AV_NOPTS_VALUE;
     ist->next_dts = AV_NOPTS_VALUE;
 
     return 0;
 }
 
+/**
+ * @brief 根据输出流ost保存对应的输入流下标，获取输入流结构体.
+ * @param ost 输出流
+ * @return 成功=返回输出流对应的输入流; 失败=NULL
+*/
 static InputStream *get_input_stream(OutputStream *ost)
 {
     if (ost->source_index >= 0)
@@ -2995,14 +3054,19 @@ static int check_init_output_file(OutputFile *of, int file_index)
 {
     int ret, i;
 
+    /*1.检查每个输出流是否都已经被初始化*/
     for (i = 0; i < of->ctx->nb_streams; i++) {
-        OutputStream *ost = output_streams[of->ost_index + i];
+        OutputStream *ost = output_streams[of->ost_index + i];//of->ost_index基本是0,暂时还没遇到过第一个流不是0的情况
         if (!ost->initialized)
             return 0;
     }
 
     of->ctx->interrupt_callback = int_cb;
 
+    /*2.写头.
+     * 这里看到，输出流的解复用选项在这里被使用。
+     * 输入流的解复用选项在avformat_open_input()被使用.
+    */
     ret = avformat_write_header(of->ctx, &of->opts);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR,
@@ -3012,7 +3076,7 @@ static int check_init_output_file(OutputFile *of, int file_index)
         return ret;
     }
     //assert_avoptions(of->opts);
-    of->header_written = 1;
+    of->header_written = 1;//标记写头成功
 
     av_dump_format(of->ctx, file_index, of->ctx->url, 1);
 
@@ -3024,9 +3088,26 @@ static int check_init_output_file(OutputFile *of, int file_index)
         OutputStream *ost = output_streams[of->ost_index + i];
 
         /* try to improve muxing time_base (only possible if nothing has been written yet) */
+        /*尝试改进muxing time_base(只有在还没有写入任何内容的情况下才可能)*/
+        /*av_fifo_size()：返回AVFifoBuffer中以字节为单位的数据量，也就是你可以从它读取的数据量。
+         * 源码很简单：return (uint32_t)(f->wndx - f->rndx);
+         *
+         * 而该fifo队列没使用时，f->wndx=f->rndx=0;
+         * 详细看AVFifoBuffer *frame_queue的注释.
+        */
         if (!av_fifo_size(ost->muxing_queue))
-            ost->mux_timebase = ost->st->time_base;
+            ost->mux_timebase = ost->st->time_base;//只有fifo队列没使用才会进来
 
+        /*
+         * av_fifo_generic_read():将数据从AVFifoBuffer提供 给 用户提供的回调.
+         * 大概看了一下源码，数据会读完后，AVFifoBuffer的rptr会指向这片内存的起始地址.
+         * 所以下面就是，将fifo的pkt出来，然后调用write_packet写包，最终while会把复用队列清空。
+         * 若想更好邻居，需要理解av_fifo_generic_read()，而理解它需要理解rptr、wptr、rndx、wndx的含义。
+         * 而理解这几个成员，则需要把libavutil/fifo.c里面的api看完，源码不多，该fifo队列设计类似ffplay的帧队列.
+         * 不想花时间的，知道av_fifo_generic_read的作用：
+         * 1）从fifo读出来出来，保存在&pkt；
+         * 2）然后会把sizeof(pkt)大小的字节从fifo删掉即可。
+        */
         while (av_fifo_size(ost->muxing_queue)) {
             AVPacket pkt;
             av_fifo_generic_read(ost->muxing_queue, &pkt, sizeof(pkt), NULL);
@@ -3037,24 +3118,44 @@ static int check_init_output_file(OutputFile *of, int file_index)
     return 0;
 }
 
+/**
+ * @brief 具体作用暂不分析.代码逻辑很简单.
+ */
 static int init_output_bsfs(OutputStream *ost)
 {
     AVBSFContext *ctx;
     int i, ret;
 
+    //如果nb_bitstream_filters为0，是不会覆盖输出流已有的参数ost->st->codecpar
+    //没设置会直接返回0
     if (!ost->nb_bitstream_filters)
         return 0;
 
+    /*1.遍历ost->bsf_ctx数组，给其赋值*/
     for (i = 0; i < ost->nb_bitstream_filters; i++) {
         ctx = ost->bsf_ctx[i];
 
+        /*这里的赋值流程很简单，就是像链表一样赋值。
+         * 1）当i=0时，使用ost->st->codecpar给ctx->par_in赋值；
+         * 然后av_bsf_init()将ctx->par_in的值赋给ctx->par_out；
+         * 2）当i!=0时，使用上一个元素的par_out给当前ctx->par_in赋值；
+         * 然后av_bsf_init()继续将ctx->par_in的值赋给ctx->par_out；
+         * 以此类推。画成赋值顺序的链表可以这样表示(注是赋值顺序，不是指针的指向)：
+         * ost->st->codecpar ==> [0]ctx->par_in ==> [0]ctx->par_out
+         * ==> [1]ctx->par_in ==> [1]ctx->par_out
+         * ==> [2]ctx->par_in ==> [2]ctx->par_out 以此类推...
+        */
         ret = avcodec_parameters_copy(ctx->par_in,
                                       i ? ost->bsf_ctx[i - 1]->par_out : ost->st->codecpar);
         if (ret < 0)
             return ret;
 
+        //同理
         ctx->time_base_in = i ? ost->bsf_ctx[i - 1]->time_base_out : ost->st->time_base;
 
+        /* av_bsf_init(): 初始化AVBSFContext.
+         * 注，内部会调用avcodec_parameters_copy(ctx->par_out, ctx->par_in);
+         * 给ctx->par_out赋值*/
         ret = av_bsf_init(ctx);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error initializing bitstream filter: %s\n",
@@ -3063,6 +3164,12 @@ static int init_output_bsfs(OutputStream *ost)
         }
     }
 
+    /*2.将ost->bsf_ctx尾元素的par_out，给输出流的参数ost->st->codecpar赋值.
+     * 但注意，ctx->par_out实际上是由ost->st->codecpar赋值得到的，这里再使用
+     * ctx->par_out给ost->st->codecpar赋值，有什么区别吗？
+     * 笔者认为，唯一区别就是ctx->par_out经过了av_bsf_init的处理，与原来的参数
+     * 比应该就是多了初始化的部分。
+    .*/
     ctx = ost->bsf_ctx[ost->nb_bitstream_filters - 1];
     ret = avcodec_parameters_copy(ost->st->codecpar, ctx->par_out);
     if (ret < 0)
@@ -3073,6 +3180,11 @@ static int init_output_bsfs(OutputStream *ost)
     return 0;
 }
 
+/**
+ * @brief 不转码时，给OutputStream类型初始化的流程，基本与转码的流程差不多.
+ * @param ost 输出流
+ * @return 成功=0； 失败=返回负数或者程序退出.
+ */
 static int init_output_stream_streamcopy(OutputStream *ost)
 {
     OutputFile *of = output_files[ost->file_index];
@@ -3085,6 +3197,8 @@ static int init_output_stream_streamcopy(OutputStream *ost)
 
     av_assert0(ist && !ost->filter);
 
+    /*1.从输入流中拷贝参数到输出流的编码器上下文.
+     该函数源码很简单，里面是深拷贝实现.*/
     ret = avcodec_parameters_to_context(ost->enc_ctx, ist->st->codecpar);
     if (ret >= 0)
         ret = av_opt_set_dict(ost->enc_ctx, &ost->encoder_opts);
@@ -3094,6 +3208,9 @@ static int init_output_stream_streamcopy(OutputStream *ost)
         return ret;
     }
 
+    /*2.从输出流的编码器拷贝参数到ost->ref_par.
+     该函数源码很简单，里面是深拷贝实现.
+    avcodec_parameters_to_context()/avcodec_parameters_from_context()基本一样的，只不过赋值的对象调换了*/
     ret = avcodec_parameters_from_context(par_src, ost->enc_ctx);
     if (ret < 0) {
         av_log(NULL, AV_LOG_FATAL,
@@ -3101,7 +3218,8 @@ static int init_output_stream_streamcopy(OutputStream *ost)
         return ret;
     }
 
-    if (!codec_tag) {
+    /*3.后续分析这个tag*/
+    if (!codec_tag) {//ost->st->codecpar->codec_tag
         unsigned int codec_tag_tmp;
         if (!of->ctx->oformat->codec_tag ||
             av_codec_get_id (of->ctx->oformat->codec_tag, par_src->codec_tag) == par_src->codec_id ||
@@ -3109,6 +3227,9 @@ static int init_output_stream_streamcopy(OutputStream *ost)
             codec_tag = par_src->codec_tag;
     }
 
+    /*4. 从par_src拷贝编解码器信息到par_dst。
+     * 看回上面，par_src是从输入流的参数得到的。参数传递的流程：
+     * ist->st->codecpar ==> ost->enc_ctx ==> par_src(ost->ref_par) ==> par_dst(ost->st->codecpar)*/
     ret = avcodec_parameters_copy(par_dst, par_src);
     if (ret < 0)
         return ret;
@@ -3119,21 +3240,32 @@ static int init_output_stream_streamcopy(OutputStream *ost)
         ost->frame_rate = ist->framerate;
     ost->st->avg_frame_rate = ost->frame_rate;
 
+    /*5.将内部时间信息从一个流传输到另一个流。*/
+    /* avformat_transfer_internal_stream_timing_info():
+     * @param ofmt ost的目标输出格式
+     * @param ost 需要定时复制和调整的输出流
+     * @param ist 引用输入流以从中复制计时
+     * @param copy_tb 定义需要从何处导入流编解码器时基
+     * 看该函数源码，大概就是对时基和帧率做处理.
+    */
     ret = avformat_transfer_internal_stream_timing_info(of->ctx->oformat, ost->st, ist->st, copy_tb);
     if (ret < 0)
         return ret;
 
-    // copy timebase while removing common factors
+    // copy timebase while removing common factors(在删除公共因子的同时复制时基)
+    /*6.初始化 流的时基, 将编码器的时基拷贝给流的时基.*/
     if (ost->st->time_base.num <= 0 || ost->st->time_base.den <= 0)
         ost->st->time_base = av_add_q(av_stream_get_codec_timebase(ost->st), (AVRational){0, 1});
 
-    // copy estimated duration as a hint to the muxer
+    // copy estimated duration as a hint to the muxer((复制估计持续时间作为对muxer的提示))
+    /*7.若输出流的duration不存在，则将输入流的duration转换单位后，赋值给输出流的duration*/
     if (ost->st->duration <= 0 && ist->st->duration > 0)
         ost->st->duration = av_rescale_q(ist->st->duration, ist->st->time_base, ost->st->time_base);
 
     // copy disposition
     ost->st->disposition = ist->st->disposition;
 
+    /*8.若输入流的side_data存在，则使用输入流的size_data给输出流赋值.不懂可参考转码的注释.*/
     if (ist->st->nb_side_data) {
         for (i = 0; i < ist->st->nb_side_data; i++) {
             const AVPacketSideData *sd_src = &ist->st->side_data[i];
@@ -3146,31 +3278,38 @@ static int init_output_stream_streamcopy(OutputStream *ost)
         }
     }
 
+    /*是否对side_data数据类型为AV_PKT_DATA_DISPLAYMATRIX的内容重写.*/
     if (ost->rotate_overridden) {
         uint8_t *sd = av_stream_new_side_data(ost->st, AV_PKT_DATA_DISPLAYMATRIX,
                                               sizeof(int32_t) * 9);
         if (sd)
-            av_display_rotation_set((int32_t *)sd, -ost->rotate_override_value);
+            av_display_rotation_set((int32_t *)sd, -ost->rotate_override_value);//转码时，这里旋转重写的值(rotate_override_value)是0.
     }
 
-    switch (par_dst->codec_type) {
+    /*9.根据不同媒体类型给成员赋值*/
+    switch (par_dst->codec_type) {//par_dst = ost->st->codecpar;
     case AVMEDIA_TYPE_AUDIO:
+        /*-acodec copy和-vol不能同时使用.因为我们看到audio_volume默认是256,
+         当不是256说明用户添加-vol，就需要解码，而用户又指定了copy，所以ffmpeg会报错.*/
         if (audio_volume != 256) {
             av_log(NULL, AV_LOG_FATAL, "-acodec copy and -vol are incompatible (frames are not decoded)\n");
             exit_program(1);
         }
+        /* block_align: 仅音频。某些格式所需的每个编码音频帧的字节数。
+         * 对应于WAVEFORMATEX中的nBlockAlign。*/
         if((par_dst->block_align == 1 || par_dst->block_align == 1152 || par_dst->block_align == 576) && par_dst->codec_id == AV_CODEC_ID_MP3)
             par_dst->block_align= 0;
         if(par_dst->codec_id == AV_CODEC_ID_AC3)
             par_dst->block_align= 0;
         break;
     case AVMEDIA_TYPE_VIDEO:
-        if (ost->frame_aspect_ratio.num) { // overridden by the -aspect cli option
+        //获取宽高比，优先获取用户输入的frame_aspect_ratio，再到ist->st->sample_aspect_ratio、par_src->sample_aspect_ratio
+        if (ost->frame_aspect_ratio.num) { // overridden by the -aspect cli option(被-aspect命令行选项覆盖)
             sar =
                 av_mul_q(ost->frame_aspect_ratio,
                          (AVRational){ par_dst->height, par_dst->width });
             av_log(NULL, AV_LOG_WARNING, "Overriding aspect ratio "
-                   "with stream copy may produce invalid files\n");
+                   "with stream copy may produce invalid files\n");//(用流复制重写纵横比可能会产生无效文件)
             }
         else if (ist->st->sample_aspect_ratio.num)
             sar = ist->st->sample_aspect_ratio;
@@ -3187,6 +3326,11 @@ static int init_output_stream_streamcopy(OutputStream *ost)
     return 0;
 }
 
+/**
+ * @brief 这里会给每一个流增加一个encoder元数据选项。
+ * @param of 输出文件封装结构体
+ * @param ost 输出流
+ */
 static void set_encoder_id(OutputFile *of, OutputStream *ost)
 {
     AVDictionaryEntry *e;
@@ -3196,16 +3340,34 @@ static void set_encoder_id(OutputFile *of, OutputStream *ost)
     int format_flags = 0;
     int codec_flags = ost->enc_ctx->flags;
 
+    /*1.若流的metadata的encoder选项不是空，则返回.
+    因为在open_output_file()会将每一个流的元数据的encoder置为NULL*/
     if (av_dict_get(ost->st->metadata, "encoder",  NULL, 0))
         return;
 
-    e = av_dict_get(of->opts, "fflags", NULL, 0);
-    if (e) {
+    {
+        //tyycode
+        /* 测试av_opt_eval_flags():可以看到，从of-ctx找到fflags后，就是libavformat/options_table.h文件里的变量
+         * static const AVOption avformat_options[]的fflags选项。*/
         const AVOption *o = av_opt_find(of->ctx, "fflags", NULL, 0, 0);
         if (!o)
             return;
+        /*假设解复用选项of->opts的fflags的value值被设为"32"，那么通过av_opt_eval_flags后，将里面的数字会设置到format_flags中，
+           所以看到，format_flags的值 从0变成32.注，因为fflags是int64(具体类型需要看源码)，所以必须是该类型是字符串，例下面"32"写成"32.2"是无法读到数字的*/
+        av_opt_eval_flags(of->ctx, o, "32", &format_flags);
+    }
+    /*2.若用户设置了解复用的fflags选项，则进行获取，然后保存在临时变量format_flags中*/
+    /*关于AVOption模块，可参考: https://blog.csdn.net/ericbar/article/details/79872779*/
+    e = av_dict_get(of->opts, "fflags", NULL, 0);
+    if (e) {
+        //若解复用不支持fflags选项，则返回
+        const AVOption *o = av_opt_find(of->ctx, "fflags", NULL, 0, 0);
+        if (!o)
+            return;
+        /*opt_eval_funcs: 计算选项字符串。这组函数可用于计算选项字符串并从中获取数字。它们所做的事情与av_opt_set()相同，只是结果被写入调用方提供的指针*/
         av_opt_eval_flags(of->ctx, o, e->value, &format_flags);
     }
+    /*3.同理，若用户设置了编码器的flags选项，则进行获取，然后保存在临时变量codec_flags中*/
     e = av_dict_get(ost->encoder_opts, "flags", NULL, 0);
     if (e) {
         const AVOption *o = av_opt_find(ost->enc_ctx, "flags", NULL, 0, 0);
@@ -3214,19 +3376,26 @@ static void set_encoder_id(OutputFile *of, OutputStream *ost)
         av_opt_eval_flags(ost->enc_ctx, o, e->value, &codec_flags);
     }
 
+    /*4.获取编码器长度.LIBAVCODEC_IDENT宏里面的 ## 是拼接前后两个宏参数的意思.*/
     encoder_string_len = sizeof(LIBAVCODEC_IDENT) + strlen(ost->enc->name) + 2;
     encoder_string     = av_mallocz(encoder_string_len);
     if (!encoder_string)
         exit_program(1);
 
-    //这里会给每一个流增加一个encoder元数据选项
-    if (!(format_flags & AVFMT_FLAG_BITEXACT) && !(codec_flags & AV_CODEC_FLAG_BITEXACT))
+    /*5.若format_flags和codec_flags都不包含宏AVFMT_FLAG_BITEXACT，则使用LIBAVCODEC_IDENT字符串,
+        否则直接使用"Lavc ".*/
+    if (!(format_flags & AVFMT_FLAG_BITEXACT) && !(codec_flags & AV_CODEC_FLAG_BITEXACT)){
+        char *t1 = AV_STRINGIFY(AV_VERSION_DOT(58,100,54));//将宏转成字符串
+        char *tyycode1 = LIBAVCODEC_IDENT;
+        char *tyycode2 = LIBAVCODEC_IDENT " ";//这里只是在末尾加个空格
         av_strlcpy(encoder_string, LIBAVCODEC_IDENT " ", encoder_string_len);
-    else
+    }
+    else{
         av_strlcpy(encoder_string, "Lavc ", encoder_string_len);
-    av_strlcat(encoder_string, ost->enc->name, encoder_string_len);
+    }
+    av_strlcat(encoder_string, ost->enc->name, encoder_string_len);//字符串拼接
     av_dict_set(&ost->st->metadata, "encoder",  encoder_string,
-                AV_DICT_DONT_STRDUP_VAL | AV_DICT_DONT_OVERWRITE);
+                AV_DICT_DONT_STRDUP_VAL | AV_DICT_DONT_OVERWRITE);//最终设置到流的元数据
 
     {
         //tyycode
@@ -3237,6 +3406,9 @@ static void set_encoder_id(OutputFile *of, OutputStream *ost)
     }
 }
 
+/**
+ * @brief 后续遇到再分析，因为比较少用
+*/
 static void parse_forced_key_frames(char *kf, OutputStream *ost,
                                     AVCodecContext *avctx)
 {
@@ -3300,54 +3472,83 @@ static void parse_forced_key_frames(char *kf, OutputStream *ost,
     ost->forced_kf_pts   = pts;
 }
 
+/**
+ * @brief 初始化编码器时间基。
+ * @param ost 输出流
+ * @param default_time_base 编码的时间基
+ *
+ * @note 转时基只涉及输入容器与输出容器的时间基。解复用以及复用的时间基(即输入输出容器的时间基，对应字段是AVFormatCtx->stream->time_base)。
+ * 而这里的编码时间基，可认为是中间的时间基，用于运算。
+ * 可参考这三篇(不一定百分百准确)：
+ * https://blog.csdn.net/weixin_44517656/article/details/110452852
+ * https://blog.csdn.net/weixin_44517656/article/details/110494609
+ * https://blog.csdn.net/weixin_44517656/article/details/110559611
+ * @return void
+*/
 static void init_encoder_time_base(OutputStream *ost, AVRational default_time_base)
 {
     InputStream *ist = get_input_stream(ost);
     AVCodecContext *enc_ctx = ost->enc_ctx;
     AVFormatContext *oc;
 
+    //1.用户指定且有效，则使用用户的参数作为编码时间基？
     if (ost->enc_timebase.num > 0) {
         enc_ctx->time_base = ost->enc_timebase;
         return;
     }
 
+    //2.用户指定且无效，那么判断输入流的流时间基(解码时间基)，若有效则使用输入容器的时间基，否则使用参数传进的默认时间基
     if (ost->enc_timebase.num < 0) {
         if (ist) {
             enc_ctx->time_base = ist->st->time_base;
             return;
         }
 
+        //用户传入的编码时间基非法，使用参数传进的默认时间基.
         oc = output_files[ost->file_index]->ctx;
         av_log(oc, AV_LOG_WARNING, "Input stream data not available, using default time base\n");
     }
 
+    //3.用户没指定，则使用默认时基
     enc_ctx->time_base = default_time_base;
 }
 
+/**
+ * @brief 对封装的输出流结构体OutputStream进行初始化。
+ *  主要是OutputStream内部相关成员以及OutputStream->enc_ctx的初始化。
+ * @param ost 输出流
+ * @return =0表示成功，否则为一个与AVERROR代码对应的负值 或者 程序退出
+*/
 static int init_output_stream_encode(OutputStream *ost)
 {
     InputStream *ist = get_input_stream(ost);
     AVCodecContext *enc_ctx = ost->enc_ctx;
     AVCodecContext *dec_ctx = NULL;
-    AVFormatContext *oc = output_files[ost->file_index]->ctx;
+    AVFormatContext *oc = output_files[ost->file_index]->ctx;//获取输出流对应输出文件的oc
     int j, ret;
 
+    /*1.给输出流的元数据添加encoder选项*/
     set_encoder_id(output_files[ost->file_index], ost);
 
     // Muxers use AV_PKT_DATA_DISPLAYMATRIX to signal rotation. On the other
     // hand, the legacy API makes demuxers set "rotate" metadata entries,
     // which have to be filtered out to prevent leaking them to output files.
+    /*(muxer使用AV_PKT_DATA_DISPLAYMATRIX来表示旋转。另一方面，遗留API使解复用器设置“旋转”元数据条目，这些条目必须被过滤掉，以防止泄漏到输出文件中。)*/
+    /*2.若输出流的元数据存在rotate选项，则将其删除*/
     av_dict_set(&ost->st->metadata, "rotate", NULL, 0);
 
+    /*3.主要初始化流的disposition*/
     if (ist) {
-        ost->st->disposition          = ist->st->disposition;
+        ost->st->disposition          = ist->st->disposition;/*这个流中的disposition成员好像与附属图片相关*/
 
         dec_ctx = ist->dec_ctx;
 
-        enc_ctx->chroma_sample_location = dec_ctx->chroma_sample_location;
+        enc_ctx->chroma_sample_location = dec_ctx->chroma_sample_location;/*这定义了色度样本的位置*/
     } else {
+        /*可后续研究*/
         for (j = 0; j < oc->nb_streams; j++) {
             AVStream *st = oc->streams[j];
+            /*这个if条件当某个媒体类型存在多个时，才会满足.例如ost是视频流，且输出视频流有两个，那么就会满足*/
             if (st != ost->st && st->codecpar->codec_type == ost->st->codecpar->codec_type)
                 break;
         }
@@ -3357,7 +3558,9 @@ static int init_output_stream_encode(OutputStream *ost)
                 ost->st->disposition = AV_DISPOSITION_DEFAULT;
     }
 
+    /*4.获取视频帧率*/
     if (enc_ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
+        /*若用户没有指定帧率，优先从过滤器中获取，if条件越在上面，优先级越高*/
         if (!ost->frame_rate.num)
             ost->frame_rate = av_buffersink_get_frame_rate(ost->filter->filter);
         if (ist && !ost->frame_rate.num)
@@ -3374,19 +3577,24 @@ static int init_output_stream_encode(OutputStream *ost)
                    ost->file_index, ost->index);
         }
 
+        /*若编码器有支持的帧率数组，且没有强制帧率，那么会根据上面存储的帧率，在ffmpeg的帧率数组中找到一个最近的帧率*/
         if (ost->enc->supported_framerates && !ost->force_fps) {
             int idx = av_find_nearest_q_idx(ost->frame_rate, ost->enc->supported_framerates);
             ost->frame_rate = ost->enc->supported_framerates[idx];
         }
         // reduce frame rate for mpeg4 to be within the spec limits
+        // (降低mpeg4的帧率，使其在规格限制内)
+        // 怎么降低，有兴趣的自行看源码，这里不深入研究
         if (enc_ctx->codec_id == AV_CODEC_ID_MPEG4) {
             av_reduce(&ost->frame_rate.num, &ost->frame_rate.den,
                       ost->frame_rate.num, ost->frame_rate.den, 65535);
         }
     }
 
+    /*5.设置不同媒体类型的编码器中的相关参数*/
     switch (enc_ctx->codec_type) {
     case AVMEDIA_TYPE_AUDIO:
+        /*通过过滤器获取音频相关参数*/
         enc_ctx->sample_fmt     = av_buffersink_get_format(ost->filter->filter);
         if (dec_ctx)
             enc_ctx->bits_per_raw_sample = FFMIN(dec_ctx->bits_per_raw_sample,
@@ -3395,38 +3603,66 @@ static int init_output_stream_encode(OutputStream *ost)
         enc_ctx->channel_layout = av_buffersink_get_channel_layout(ost->filter->filter);
         enc_ctx->channels       = av_buffersink_get_channels(ost->filter->filter);
 
-        init_encoder_time_base(ost, av_make_q(1, enc_ctx->sample_rate));
+        init_encoder_time_base(ost, av_make_q(1, enc_ctx->sample_rate));//通过采样率设置音频编码器的时间基
         break;
 
     case AVMEDIA_TYPE_VIDEO:
+        //通过帧率设置视频编码器的时间基.注意av_inv_q是分子分母调转然后返回.例如帧率={25,1}，那么返回时间基就是{1,25}
+        //视频编码器的时间基一般都是设为帧率的倒数,see https://blog.csdn.net/weixin_44517656/article/details/110355462
         init_encoder_time_base(ost, av_inv_q(ost->frame_rate));
 
+        //若编码器的时间基存在一个为0，则从过滤器中获取时间基
         if (!(enc_ctx->time_base.num && enc_ctx->time_base.den))
             enc_ctx->time_base = av_buffersink_get_time_base(ost->filter->filter);
-        if (   av_q2d(enc_ctx->time_base) < 0.001 && video_sync_method != VSYNC_PASSTHROUGH
-           && (video_sync_method == VSYNC_CFR || video_sync_method == VSYNC_VSCFR || (video_sync_method == VSYNC_AUTO && !(oc->oformat->flags & AVFMT_VARIABLE_FPS)))){
+
+        /*检测帧率是否很大，因为上面讲过，编码器的时基就是帧率的倒数，若时基很小，说明帧率很大。
+        若帧率很大，会判断视频同步方法：若不是PASSTHROUGH，则会优先判断是否是auto，然后再判断是否是vscfr、cfr.
+        理解这里需要知道逻辑运算符的优先级，或运算是比与运算低的，具体看open_output_file()中-map=0的字幕流逻辑.*/
+        if (   av_q2d(enc_ctx->time_base) < 0.001 && video_sync_method != VSYNC_PASSTHROUGH/*1)时间基小于千分之一且video_sync_method!=0*/
+           && (video_sync_method == VSYNC_CFR /*4)视频同步方法是cfr*/
+               || video_sync_method == VSYNC_VSCFR || /*3)视频同步方法是vscfr*/
+               (video_sync_method == VSYNC_AUTO && !(oc->oformat->flags & AVFMT_VARIABLE_FPS))))/*2)视频同步方法是自动且不包含该宏*/
+        {
             av_log(oc, AV_LOG_WARNING, "Frame rate very high for a muxer not efficiently supporting it.\n"
                                        "Please consider specifying a lower framerate, a different muxer or -vsync 2\n");
         }
+
+        /*将forced_kf_pts由单位AV_TIME_BASE_Q转成enc_ctx->time_base的时基单位.暂未深入研究
+         * av_rescale_q()的原理：加上要转的pts=a，时基1{x1,y1}，时基2{x2,y2};
+         * 因为转化前后的比是一样的，设转换后的pts=b，那么有a*x1/y1=b*x2/y2; 化简：
+         * b=(a*x1*y2)/(y1*x2).
+         * 对比注释，a * bq / cq这句话实际上看不出来，我们看源码验证上面：
+         * 在av_rescale_q_rnd内部会将两个时基换算，然后调用av_rescale_rnd()，参数最终变成：
+         * av_rescale_rnd(a, x1*y2, y1*x2, AV_ROUND_NEAR_INF);
+         * 在av_rescale_rnd()内部，正常逻辑走：return (a * b + r) / c;
+         * 那么去掉加上r，就验证了我们上面的原理.
+         * av_rescale_q() see https://blog.csdn.net/weixin_44517656/article/details/110559611
+        */
         for (j = 0; j < ost->forced_kf_count; j++)
             ost->forced_kf_pts[j] = av_rescale_q(ost->forced_kf_pts[j],
                                                  AV_TIME_BASE_Q,
                                                  enc_ctx->time_base);
 
+        /* 获取样品宽高比。获取方法：用户指定，则会使用av_mul_q获取；没指定，则从过滤器获取宽高比.
+         * av_mul_q:两个有理数相乘，结果通过参数b传出,内部调用了av_reduce().
+        */
         enc_ctx->width  = av_buffersink_get_w(ost->filter->filter);
         enc_ctx->height = av_buffersink_get_h(ost->filter->filter);
         enc_ctx->sample_aspect_ratio = ost->st->sample_aspect_ratio =
-            ost->frame_aspect_ratio.num ? // overridden by the -aspect cli option
+            ost->frame_aspect_ratio.num ? // overridden by the -aspect cli option(被-aspect命令行选项覆盖)
             av_mul_q(ost->frame_aspect_ratio, (AVRational){ enc_ctx->height, enc_ctx->width }) :
             av_buffersink_get_sample_aspect_ratio(ost->filter->filter);
 
+        /*从过滤器获取像素格式*/
         enc_ctx->pix_fmt = av_buffersink_get_format(ost->filter->filter);
+        /*内部libavcodec像素/样本格式的每个样本/像素位*/
         if (dec_ctx)
             enc_ctx->bits_per_raw_sample = FFMIN(dec_ctx->bits_per_raw_sample,
                                                  av_pix_fmt_desc_get(enc_ctx->pix_fmt)->comp[0].depth);
 
+        /*设置帧率到编码器上下文*/
         enc_ctx->framerate = ost->frame_rate;
-
+        /*设置帧率到输出流的平均帧率*/
         ost->st->avg_frame_rate = ost->frame_rate;
 
         if (!dec_ctx ||
@@ -3442,7 +3678,29 @@ static int init_output_stream_encode(OutputStream *ost)
             enc_ctx->field_order = AV_FIELD_TT;
         }
 
+        /*
+         * 强制关键帧表达式解析.
+         * 两种逻辑解析：
+         * 1）forced_keyframes前5个字符面是"expr:"；
+         * 2）forced_keyframes前6个字符面是"source"；
+         * 暂不深入研究，比较少遇到，二次封装时可注释掉.
+        */
         if (ost->forced_keyframes) {
+            /*
+             * av_expr_parse(): 解析表达式。
+             * @param expr 是一个指针，在成功解析的情况下放置一个包含解析值的AVExpr，否则为NULL。
+             *              当用户不再需要AVExpr时，必须使用av_expr_free()释放指向AVExpr的对象。
+             * @param s 表达式作为一个以0结尾的字符串，例如“1+2^3+5*5+sin(2/3)”。就理解成是一个字符串即可.
+             *
+             * @param const_names NULL终止数组，零终止字符串的常量标识符，例如{"PI"， "E"， 0}
+             * @param func1_names NULL终止数组，包含0终止的funcs1标识符字符串
+             * @param funcs1 NULL结束的函数指针数组，用于带有1个参数的函数
+             * @param func2_names NULL终止数组，包含0终止的funcs2标识符字符串
+             * @param funcs2带两个参数的函数指针数组，以NULL结尾
+             *
+             * @param log_ctx父日志上下文
+             * @return >= 0表示成功，否则为一个与AVERROR代码对应的负值
+            */
             if (!strncmp(ost->forced_keyframes, "expr:", 5)) {
                 ret = av_expr_parse(&ost->forced_keyframes_pexpr, ost->forced_keyframes+5,
                                     forced_keyframes_const_names, NULL, NULL, NULL, NULL, 0, NULL);
@@ -3451,6 +3709,7 @@ static int init_output_stream_encode(OutputStream *ost)
                            "Invalid force_key_frames expression '%s'\n", ost->forced_keyframes+5);
                     return ret;
                 }
+                /*forced_keyframes_expr_const_values[]数组初始化*/
                 ost->forced_keyframes_expr_const_values[FKF_N] = 0;
                 ost->forced_keyframes_expr_const_values[FKF_N_FORCED] = 0;
                 ost->forced_keyframes_expr_const_values[FKF_PREV_FORCED_N] = NAN;
@@ -3458,13 +3717,15 @@ static int init_output_stream_encode(OutputStream *ost)
 
                 // Don't parse the 'forced_keyframes' in case of 'keep-source-keyframes',
                 // parse it only for static kf timings
+                //(不要在'keep-source-keyframes'的情况下解析' force_keyframes '，只在静态kf计时时解析它)
             } else if(strncmp(ost->forced_keyframes, "source", 6)) {
                 parse_forced_key_frames(ost->forced_keyframes, ost, ost->enc_ctx);
             }
         }
         break;
     case AVMEDIA_TYPE_SUBTITLE:
-        enc_ctx->time_base = AV_TIME_BASE_Q;
+        enc_ctx->time_base = AV_TIME_BASE_Q;//字幕编码上下文的时基单位是微秒.
+        //没有分辨率，默认使用输入流中保存的分辨率
         if (!enc_ctx->width) {
             enc_ctx->width     = input_streams[ost->source_index]->st->codecpar->width;
             enc_ctx->height    = input_streams[ost->source_index]->st->codecpar->height;
@@ -3477,45 +3738,177 @@ static int init_output_stream_encode(OutputStream *ost)
         break;
     }
 
+    /*6.以编码器上下文的时基作为复用的时基*/
     ost->mux_timebase = enc_ctx->time_base;
 
     return 0;
 }
 
+//tyycode 用于测试av_add_q()等函数
+#if 1
+#if HAVE_FAST_CLZ
+#if AV_GCC_VERSION_AT_LEAST(3,4)
+#ifndef ff_ctz
+#define ff_ctz(v) __builtin_ctz(v)
+#endif
+#ifndef ff_ctzll
+#define ff_ctzll(v) __builtin_ctzll(v)
+#endif
+#ifndef ff_clz
+#define ff_clz(v) __builtin_clz(v)
+#endif
+#endif
+#endif
+/* Stein's binary GCD algorithm:
+ * https://en.wikipedia.org/wiki/Binary_GCD_algorithm */
+int64_t av_gcd(int64_t a, int64_t b) {
+    int za, zb, k;
+    int64_t u, v;
+    if (a == 0)
+        return b;
+    if (b == 0)
+        return a;
+    za = ff_ctzll(a);//求次方数，例如1000,那么就是za=3，1000000，那么za=6.不能求出10的次方数会返回0？例如我测试99,2345都是返回0
+    zb = ff_ctzll(b);
+    k  = FFMIN(za, zb);
+    u = llabs(a >> za);//获取给定值的绝对值，返回值是long long，与abs，labs类似，只不过精度不一样.
+    v = llabs(b >> zb);//例如100 0000，二进制=11110100001001000000，右移6位是15625
+    while (u != v) {
+        if (u > v)
+            FFSWAP(int64_t, v, u);
+        v -= u;
+        v >>= ff_ctzll(v);
+    }
+    return (uint64_t)u << k;
+}
+
+//不深入研究
+int av_reduce(int *dst_num, int *dst_den,
+              int64_t num, int64_t den, int64_t max)
+{
+    AVRational a0 = { 0, 1 }, a1 = { 1, 0 };
+    /* ^: 异或，相同为0，不同为1.
+     * 将num den为正负的四种可能列出来，正正 正负 负正 负负，
+     * 结果对应0 1 1 0。故sign为1，就说明num或者den存在一正一负.
+    */
+    int sign = (num < 0) ^ (den < 0);
+    int64_t gcd = av_gcd(FFABS(num), FFABS(den));//gcd不深入研究
+
+    if (gcd) {
+        num = FFABS(num) / gcd;
+        den = FFABS(den) / gcd;
+    }
+    if (num <= max && den <= max) {
+        a1 = (AVRational) { num, den };
+        den = 0;
+    }
+
+    /*正常逻辑不会进入*/
+    while (den) {
+        uint64_t x        = num / den;
+        int64_t next_den  = num - den * x;
+        int64_t a2n       = x * a1.num + a0.num;
+        int64_t a2d       = x * a1.den + a0.den;
+
+        if (a2n > max || a2d > max) {
+            if (a1.num) x =          (max - a0.num) / a1.num;
+            if (a1.den) x = FFMIN(x, (max - a0.den) / a1.den);
+
+            if (den * (2 * x * a1.den + a0.den) > num * a1.den)
+                a1 = (AVRational) { x * a1.num + a0.num, x * a1.den + a0.den };
+            break;
+        }
+
+        a0  = a1;
+        a1  = (AVRational) { a2n, a2d };
+        num = den;
+        den = next_den;
+    }
+    av_assert2(av_gcd(a1.num, a1.den) <= 1U);
+    av_assert2(a1.num <= max && a1.den <= max);
+
+    *dst_num = sign ? -a1.num : a1.num;
+    *dst_den = a1.den;
+
+    return den == 0;
+}
+
+/**
+ * @brief 两个有理数相加.
+ * 例如，以{1,2},{1,4}为例，
+ * 那么tyycodeNum的算法就是得出分子；
+ * tyycodeDen就是求出分母.
+ * 这样这得出了两个有理数相加后(同分母)的有理数.
+*/
+AVRational av_add_q(AVRational b, AVRational c) {
+    int64_t tyycodeNum = b.num * (int64_t) c.den + c.num * (int64_t) b.den;
+    int64_t tyycodeDen = b.den * (int64_t) c.den;
+    av_reduce(&b.num, &b.den, tyycodeNum, tyycodeDen, INT_MAX);
+    return b;
+}
+#endif
+
 static int init_output_stream(OutputStream *ost, char *error, int error_len)
 {
     int ret = 0;
 
+    /*1.输出流需要编码的流程*/
     if (ost->encoding_needed) {
-        AVCodec      *codec = ost->enc;
+        AVCodec      *codec = ost->enc;//在new_xxx_stream()时初始化了
         AVCodecContext *dec = NULL;
         InputStream *ist;
 
+        /*1.1给输出流结构体OutputStream相关成员赋值*/
         ret = init_output_stream_encode(ost);
         if (ret < 0)
             return ret;
 
+        /*1.2若输入文件存在subtitle_header(相当于存在字幕流)，输出文件也应该在输出流拷贝一份subtitle_header.
+         * 包含文本字幕样式信息的头。
+         * 对于SUBTITLE_ASS副标题类型，它应该包含整个ASS[脚本信息]和[V4+样式]部分，
+         * 加上[事件]行和下面的格式行。它不应该包括任何对白(对话)线。
+         * dec->subtitle_header应该指的是字幕？而不是指字幕头部相关的内容？笔者对字幕不是太熟悉，有兴趣可自行研究.
+        */
         if ((ist = get_input_stream(ost)))
             dec = ist->dec_ctx;
         if (dec && dec->subtitle_header) {
-            /* ASS code assumes this buffer is null terminated so add extra byte. */
+            /* ASS code assumes this buffer is null terminated so add extra byte.
+            (ASS代码假设这个缓冲区是空的，因此添加额外的字节)*/
             ost->enc_ctx->subtitle_header = av_mallocz(dec->subtitle_header_size + 1);
             if (!ost->enc_ctx->subtitle_header)
                 return AVERROR(ENOMEM);
             memcpy(ost->enc_ctx->subtitle_header, dec->subtitle_header, dec->subtitle_header_size);
             ost->enc_ctx->subtitle_header_size = dec->subtitle_header_size;
         }
+        /*1.3编码时线程数没设置，将设为自动*/
         if (!av_dict_get(ost->encoder_opts, "threads", NULL, 0))
             av_dict_set(&ost->encoder_opts, "threads", "auto", 0);
+        /*1.4音频时，若没设置音频码率，默认是128k*/
         if (ost->enc->type == AVMEDIA_TYPE_AUDIO &&
             !codec->defaults &&
             !av_dict_get(ost->encoder_opts, "b", NULL, 0) &&
             !av_dict_get(ost->encoder_opts, "ab", NULL, 0))
             av_dict_set(&ost->encoder_opts, "b", "128000", 0);
 
+        /*1.5若AVHWFramesContext中的像素格式与av_buffersink_get_format获取的像素格式一样，
+         * 则对av_buffersink_get_hw_frames_ctx得到的AVHWFramesContext引用数加1,
+         * 否则调用hw_device_setup_for_encode，对dev->device_ref引用数加1*/
+        //简单来说，这里就是设置enc_ctx->hw_frames_ctx或者enc_ctx->hw_device_ctx
         if (ost->filter && av_buffersink_get_hw_frames_ctx(ost->filter->filter) &&
             ((AVHWFramesContext*)av_buffersink_get_hw_frames_ctx(ost->filter->filter)->data)->format ==
             av_buffersink_get_format(ost->filter->filter)) {
+            /*
+             * ost->enc_ctx->hw_frames_ctx的注释：
+             * 对AVHWFramesContext的引用，描述了输入(编码)或输出(解码)帧。引用由调用者设置，
+             * 然后由libavcodec拥有(和释放)——设置后调用者永远不应该读取它。
+             *
+             * - decoding:该字段应该由调用者从get_format()回调中设置。之前的引用(如果有的话)在get_format()调用之前总是会被libavcodec取消。
+             * 如果默认的get_buffer2()是与hwaccel像素格式一起使用的，那么这个AVHWFramesContext将用于分配帧缓冲区。
+             * - encoding:对于配置为hwaccel像素格式的硬件编码器，该字段应该由调用者设置为描述输入帧的AVHWFramesContext的引用。
+             * AVHWFramesContext.format必须等于AVCodecContext.pix_fmt。
+             * 这个字段应该在调用avcodec_open2()之前设置。
+            */
+            /*看av_buffer_ref()源码：就是开辟一个AVBufferRef结构体后，浅拷贝指向传入参数，即就是引用数+1*/
             ost->enc_ctx->hw_frames_ctx = av_buffer_ref(av_buffersink_get_hw_frames_ctx(ost->filter->filter));
             if (!ost->enc_ctx->hw_frames_ctx)
                 return AVERROR(ENOMEM);
@@ -3528,12 +3921,16 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
                 return ret;
             }
         }
+        /*1.6判断输入输出的字幕类型是否是非法转换.
+          这里与open_output_file的new字幕流的相关判断类似*/
         if (ist && ist->dec->type == AVMEDIA_TYPE_SUBTITLE && ost->enc->type == AVMEDIA_TYPE_SUBTITLE) {
             int input_props = 0, output_props = 0;
             AVCodecDescriptor const *input_descriptor =
                 avcodec_descriptor_get(dec->codec_id);
             AVCodecDescriptor const *output_descriptor =
                 avcodec_descriptor_get(ost->enc_ctx->codec_id);
+            //例如输入描述符的字幕类型是ass(name=ass)，input_descriptor->props=131072，这个值就是AV_CODEC_PROP_TEXT_SUB的值
+            //以推流命令的-scodec text，那么通过enc_ctx->codec_id得到的output_descriptor->props也是131072，那么认为合法转换
             if (input_descriptor)
                 input_props = input_descriptor->props & (AV_CODEC_PROP_TEXT_SUB | AV_CODEC_PROP_BITMAP_SUB);
             if (output_descriptor)
@@ -3541,11 +3938,13 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
             if (input_props && output_props && input_props != output_props) {
                 snprintf(error, error_len,
                          "Subtitle encoding currently only possible from text to text "
-                         "or bitmap to bitmap");
+                         "or bitmap to bitmap");//(字幕编码目前只能从文本到文本 或 位图到位图)
                 return AVERROR_INVALIDDATA;
             }
         }
 
+        /*1.7编解码器上下文与编解码器关联.
+        这里看到，编解码器的相关选项是在这里被应用的*/
         if ((ret = avcodec_open2(ost->enc_ctx, codec, &ost->encoder_opts)) < 0) {
             if (ret == AVERROR_EXPERIMENTAL)
                 abort_codec_experimental(codec, 1);
@@ -3555,29 +3954,49 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
                     ost->file_index, ost->index);
             return ret;
         }
+        /*1.8若是音频且音频编码器不支持在每次调用中接收不同数量的样本，那么设置样本大小*/
         if (ost->enc->type == AVMEDIA_TYPE_AUDIO &&
             !(ost->enc->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE))
             av_buffersink_set_frame_size(ost->filter->filter,
                                             ost->enc_ctx->frame_size);
+        /*1.9检测是否有未知的选项，因为avcodec_open2应用后，未知的选项会返回ost->encoder_opts本身*/
         assert_avoptions(ost->encoder_opts);
+
+        //比特率设置过低。处理步骤它接受bits/s作为参数，而不是kbits/s
         if (ost->enc_ctx->bit_rate && ost->enc_ctx->bit_rate < 1000 &&
             ost->enc_ctx->codec_id != AV_CODEC_ID_CODEC2 /* don't complain about 700 bit/s modes */)
             av_log(NULL, AV_LOG_WARNING, "The bitrate parameter is set too low."
                                          " It takes bits/s as argument, not kbits/s\n");
 
+        /*1.10从编码器拷贝参数到流中。
+         因为上面我们对编码器部分成员做了赋值*/
         ret = avcodec_parameters_from_context(ost->st->codecpar, ost->enc_ctx);
         if (ret < 0) {
             av_log(NULL, AV_LOG_FATAL,
                    "Error initializing the output stream codec context.\n");
             exit_program(1);
         }
+        /*1.11将ost->enc_ctx拷贝到ost->st->codec，这一步可以不需要？*/
         /*
          * FIXME: ost->st->codec should't be needed here anymore.
+         * (修复:ost->st->codec在这里不需要了)
          */
+        /*
+         * avcodec_copy_context()注释：
+         * 将源AVCodecContext的设置复制到目标AVCodecContext中。
+         * 最终的目的地编解码器上下文将是未打开的，即你需要调用avcodec_open2()，然
+         * 后才能使用这个AVCodecContext解码/编码, 视频/音频数据。
+         * 弃用:
+         * 此函数的语义定义不明确，不应使用。如果需要将流参数从一个编解码器上下文传输到另一个，
+         * 请使用中间的AVCodecParameters实例和avcodec_parameters_from_context()/avcodec_parameters_to_context()功能。
+        */
         ret = avcodec_copy_context(ost->st->codec, ost->enc_ctx);
         if (ret < 0)
             return ret;
 
+        /*1.12将ost->enc_ctx->coded_side_data[i]的数据拷贝到st->side_data[type]，
+        而这里的st是输出流的st.*/
+        /*与整个编码流相关联的附加数据*/
         if (ost->enc_ctx->nb_coded_side_data) {
             int i;
 
@@ -3585,9 +4004,24 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
                 const AVPacketSideData *sd_src = &ost->enc_ctx->coded_side_data[i];
                 uint8_t *dst_data;
 
+                /*av_stream_new_side_data()注释:
+                 * 从流分配新信息。
+                 * 返回值：指针指向新分配的数据，否则为NULL.
+                 *
+                 * 但是注意，av_stream_new_side_data()内部是没有拷贝数据的，只是单纯的开辟内存，
+                 * 源码很简单：
+                 * 1）若传入的sd_src->type在st->side_data数组找到，则st->side_data[type]指向新new的data，
+                 * 并返回data；
+                 * 2）若传入的sd_src->type在st->side_data数组找不到，则st->side_data数组元素加1，然后该元素同样指向新new的data，
+                 * 并返回data；
+                */
                 dst_data = av_stream_new_side_data(ost->st, sd_src->type, sd_src->size);
                 if (!dst_data)
                     return AVERROR(ENOMEM);
+
+                /*拷贝数据.
+                 * 看源码知道dst_data和st->side_data[type]指向一样，
+                 * 所以此时相当于将ost->enc_ctx->coded_side_data[i]的数据拷贝到st->side_data[type]*/
                 memcpy(dst_data, sd_src->data, sd_src->size);
             }
         }
@@ -3598,7 +4032,11 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
          * really be funneled over AVFrame and libavfilter, then added back to
          * packet side data, and then potentially using the first packet for
          * global side data.
+         * (添加全局输入side data。现在，这是幼稚的，从输入流的全局side data复制它。
+         * 所有side data都应该通过AVFrame和libavfilter过滤，然后添加回包side data，然后可能使用第一个包用于全局side data)
          */
+        /*1.13若输入流的side_data存在，则使用输入流的size_data给输出流赋值.
+          所以这里看到，上面依赖coded_side_data填了输出流的side data，是可能被ist->st->side_data重写的.*/
         if (ist) {
             int i;
             for (i = 0; i < ist->st->nb_side_data; i++) {
@@ -3607,28 +4045,44 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
                 if (!dst)
                     return AVERROR(ENOMEM);
                 memcpy(dst, sd->data, sd->size);
+
+                /*AV_PKT_DATA_DISPLAYMATRIX: 这个side data包含一个3x3的变换矩阵，
+                 * 它描述了一个仿射变换，需要应用到解码的视频帧中以获得正确的表示。*/
+                /*av_display_rotation_set(): 初始化一个描述按指定角度(以度为单位)纯逆时针旋转的变换矩阵。
+                 * @param matri 分配的转换矩阵(将被此函数完全覆盖).
+                 * @param angle rotation angle in degrees(单位为度).
+                 * 源码就不深入研究了.
+                */
                 if (ist->autorotate && sd->type == AV_PKT_DATA_DISPLAYMATRIX)
                     av_display_rotation_set((uint32_t *)dst, 0);
             }
         }
 
-        // copy timebase while removing common factors
+        // copy timebase while removing common factors(在删除公共因子的同时复制时基)
+        /*1.14初始化 流的时基, 将编码器的时基拷贝给流的时基.
+         * 传{0,1}在两个有理数中加上相当于加上0，故等价于拷贝.
+         * (注上面init_output_stream_encode()是给编码器的enc_ctx->time_base赋值)*/
+        //例如enc_ctx->time_base={1,1000000},cp后，st->time_base={1,1000000}
         if (ost->st->time_base.num <= 0 || ost->st->time_base.den <= 0)
             ost->st->time_base = av_add_q(ost->enc_ctx->time_base, (AVRational){0, 1});
 
-        // copy estimated duration as a hint to the muxer
+        // copy estimated duration as a hint to the muxer(复制估计持续时间作为对muxer的提示)
+        /*1.15若输出流的duration不存在，则将输入流的duration转换单位后，赋值给输出流的duration.
+        单位从ist->st->time_base转成ost->st->time_base*/
         if (ost->st->duration <= 0 && ist && ist->st->duration > 0)
             ost->st->duration = av_rescale_q(ist->st->duration, ist->st->time_base, ost->st->time_base);
 
         ost->st->codec->codec= ost->enc_ctx->codec;
-    } else if (ost->stream_copy) {
+    } else if (ost->stream_copy) {/*2.输出流不需要编码的流程*/
         ret = init_output_stream_streamcopy(ost);
         if (ret < 0)
             return ret;
     }
 
-    // parse user provided disposition, and update stream values
+    // parse user provided disposition, and update stream values(解析用户提供的处理，并更新流值)
+    /*3.若用户设置disposition，则将其设置到ost->st->disposition。推流没用到*/
     if (ost->disposition) {
+        /*关于AVOption模块，可参考: https://blog.csdn.net/ericbar/article/details/79872779*/
         static const AVOption opts[] = {
             { "disposition"         , NULL, 0, AV_OPT_TYPE_FLAGS, { .i64 = 0 }, INT64_MIN, INT64_MAX, .unit = "flags" },
             { "default"             , NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_DISPOSITION_DEFAULT           },    .unit = "flags" },
@@ -3656,6 +4110,8 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
         };
         const AVClass *pclass = &class;
 
+        /*av_opt_eval_flags(): 利用参2给参4设置值，值为参3(可参考set_encoder_id()里的注释).
+        传参2的作用是利用该AVOption里面的一些属性，例如disposition的类型是AV_OPT_TYPE_FLAGS，共用体default_val取的是i64*/
         ret = av_opt_eval_flags(&pclass, &opts[0], ost->disposition, &ost->st->disposition);
         if (ret < 0)
             return ret;
@@ -3663,7 +4119,10 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
 
     /* initialize bitstream filters for the output stream
      * needs to be done here, because the codec id for streamcopy is not
-     * known until now */
+     * known until now
+     * (输出流的初始化位流过滤器需要在这里完成，因为流复制的编解码器id到现在还不知道)*/
+    /*4.根据是否设置bitstream_filters，来给ost->bsf_ctx数组赋值。
+     * 内部会给ost->st->codecpar重新拷贝处理.*/
     ret = init_output_bsfs(ost);
     if (ret < 0)
         return ret;
@@ -3700,12 +4159,13 @@ static int transcode_init(void)
     InputStream *ist;
     char error[1024] = {0};
 
+    /*1.暂时没看懂,推流命令没用到*/
     for (i = 0; i < nb_filtergraphs; i++) {
         FilterGraph *fg = filtergraphs[i];
         for (j = 0; j < fg->nb_outputs; j++) {
             OutputFilter *ofilter = fg->outputs[j];
-            if (!ofilter->ost || ofilter->ost->source_index >= 0)
-                continue;
+            if (!ofilter->ost || ofilter->ost->source_index >= 0)//笔者没看懂这里if条件代表的含义
+                continue;//推流命令走这里
             if (fg->nb_inputs != 1)
                 continue;
             for (k = nb_input_streams-1; k >= 0 ; k--)
@@ -3715,19 +4175,29 @@ static int transcode_init(void)
         }
     }
 
-    /* init framerate emulation */
+    /* init framerate emulation(init帧速率仿真) */
+    /*2.用户指定-re选项，则给每个输入文件的每个输入流保存一个开始时间*/
     for (i = 0; i < nb_input_files; i++) {
         InputFile *ifile = input_files[i];
-        if (ifile->rate_emu)
-            for (j = 0; j < ifile->nb_streams; j++)
+        if (ifile->rate_emu){
+            for (j = 0; j < ifile->nb_streams; j++){
+                //这里看到ist_index的作用，估计是为了防止一些输入文件中, 第一个流下标不是0的情况
                 input_streams[j + ifile->ist_index]->start = av_gettime_relative();
+            }
+        }
     }
 
     /* init input streams */
+    /*3.进一步初始化输入流(add_input_streams初始化了一部分).
+    内部会对硬件相关处理，以及调用avcodec_open2()*/
     for (i = 0; i < nb_input_streams; i++)
         if ((ret = init_input_stream(i, error, sizeof(error))) < 0) {
+            /*只要有一个输入流初始化失败，则将所有输出流编解码器上下文全部关闭*/
             for (i = 0; i < nb_output_streams; i++) {
                 ost = output_streams[i];
+                /*这个函数不会释放enc_ctx本身，需要avcodec_free_context()去做.
+                 * 参考ffmpeg/tests/api/api-h264-test.c/video_decode_example(),
+                 实际上ffmpeg注释也说了，avcodec_alloc_context3()开辟的上下文应该使用avcodec_free_context()释放*/
                 avcodec_close(ost->enc_ctx);
             }
             goto dump_format;
@@ -3735,10 +4205,12 @@ static int transcode_init(void)
 
     /* open each encoder */
     for (i = 0; i < nb_output_streams; i++) {
-        // skip streams fed from filtergraphs until we have a frame for them
+        // skip streams fed from filtergraphs until we have a frame for them(跳过过滤器的数据流，直到我们找到合适的帧)
+        /*因为我们在open_output_files()给需要转码的流创建了filter，所以音视频流一般会执行continue*/
         if (output_streams[i]->filter)
             continue;
 
+        /*字幕一般会走这里，因为在open_output_files()创建filter时，字幕不会创建*/
         ret = init_output_stream(output_streams[i], error, sizeof(error));
         if (ret < 0)
             goto dump_format;
@@ -4683,6 +5155,7 @@ static int transcode_step(void)
 
 /*
  * The following code is the main loop of the file converter
+ * (下面的代码是文件转换器的主循环)
  */
 static int transcode(void)
 {
@@ -4825,8 +5298,12 @@ static int transcode(void)
     return ret;
 }
 
+/**
+ * @brief 获取进程的实时时间戳、该进程在内核层使用的时间、该进程在用户层使用的时间.
+*/
 static BenchmarkTimeStamps get_benchmark_time_stamps(void)
 {
+    // 1. 获取实时时间
     BenchmarkTimeStamps time_stamps = { av_gettime_relative() };
 #if HAVE_GETRUSAGE
     struct rusage rusage;
@@ -4839,7 +5316,29 @@ static BenchmarkTimeStamps get_benchmark_time_stamps(void)
 #elif HAVE_GETPROCESSTIMES
     HANDLE proc;
     FILETIME c, e, k, u;
+    /*
+     * 获取当前进程的句柄，它是一个伪句柄，不需要回收，因为是伪句柄，不是真正的句柄
+     * GetCurrentProcess() see: https://blog.csdn.net/zhangjinqing1234/article/details/6449844
+    */
     proc = GetCurrentProcess();
+    /*
+     * GetProcessTimes() : 获取进程的创建时间、结束时间、内核时间、用户时间,
+     * see: http://www.vbgood.com/api-getprocesstimes.html
+     * FILETIME结构 :FILETIME 结构表示自 1601 年 1 月 1 日以来的 100 纳秒为间隔数(单位为100纳秒),
+     *                  结构包含组合在一起形成一个 64 位值的两个 32 位值。
+     * see: https://blog.csdn.net/vincen1989/article/details/7868879
+     *
+     * 除以10是因为要将100ns(纳秒)转成μs(微秒).具体转换：
+     * 1s=10^6μs;
+     * 1s=10^9ns;
+     * 那么，10^6μs=10^9ns;  得出，1μs=1000ns.
+     * 设100ns的单位是hs，那么有：
+     * 1μs=10hs;
+     * 故，从获取到的时间即(int64_t)u.dwHighDateTime << 32 | u.dwLowDateTime)设为x，单位100ns即hs，
+     * 转化后的结果是y，单位是微秒，那么由它们的比是一样的得到表达式：
+     * 1μs=10hs;yμs=xhs; ==> 1/y=10/x; ==> x=10y; ==> y=x/10
+     * 这就是下面除以10的原因.
+    */
     GetProcessTimes(proc, &c, &e, &k, &u);
     time_stamps.user_usec =
         ((int64_t)u.dwHighDateTime << 32 | u.dwLowDateTime) / 10;

@@ -22,9 +22,16 @@
 
 #include "ffmpeg.h"
 
-static int nb_hw_devices;
-static HWDevice **hw_devices;
+static int nb_hw_devices;           // 用户电脑支持的硬件设备数
+static HWDevice **hw_devices;       // 用户电脑支持的硬件设备数组
 
+///该函数的注解可能不太准确，不过意思是这样，因为笔者还没详细debug硬件相关的代码
+/**
+ * @brief 从用户支持的硬件设备列表中，获取指定的硬件设备。
+ * @param type 指定硬件设备的类型
+ * @return 找到该类型的设备，则返回硬件设备；否则返回NULL。
+ * @note nb_hw_devices是用户支持的硬件设备数，为0说明不支持，直接返回NULL
+*/
 static HWDevice *hw_device_get_by_type(enum AVHWDeviceType type)
 {
     HWDevice *found = NULL;
@@ -39,6 +46,7 @@ static HWDevice *hw_device_get_by_type(enum AVHWDeviceType type)
     return found;
 }
 
+//与hw_device_get_by_type同理
 HWDevice *hw_device_get_by_name(const char *name)
 {
     int i;
@@ -281,23 +289,42 @@ void hw_device_free_all(void)
     nb_hw_devices = 0;
 }
 
+/**
+ * @brief 通过编解码器匹配硬件设备。
+ * @param codec 编解码器
+ * @return 找到返回对应的硬件设备；找不到返回NULL
+*/
 static HWDevice *hw_device_match_by_codec(const AVCodec *codec)
 {
     const AVCodecHWConfig *config;
     HWDevice *dev;
     int i;
+    /*
+     * avcodec_get_hw_config(): 检索编解码器支持的硬件配置。
+     * 索引值从0到某个最大值返回索引配置描述符;所有其他值返回NULL。
+     * 如果编解码器不支持任何硬件配置，那么它将总是返回NULL。
+     * avcodec_get_hw_config()的源码不难,主要是(以解码为例)：
+     * 1)hw_configs的指向，我们通过编解码器的name字段看到，解码器是"h264"，
+     * 所以在libavcodec/h264dec.c找到ff_h264_decoder，这样就知道hw_configs二维数组的指向了。
+     * 只要理解hw_configs的指向，那么看这个函数就很简单了.
+    */
     for (i = 0;; i++) {
         config = avcodec_get_hw_config(codec, i);
         if (!config)
             return NULL;
         if (!(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
             continue;
+
+        //通过类型获取硬件设备.注意，该函数就是源码函数，在本文件中可以找到.
         dev = hw_device_get_by_type(config->device_type);
         if (dev)
             return dev;
     }
 }
 
+/**
+ * @brief 后续再详细分析
+*/
 int hw_device_setup_for_decode(InputStream *ist)
 {
     const AVCodecHWConfig *config;
@@ -340,10 +367,12 @@ int hw_device_setup_for_decode(InputStream *ist)
             if (!dev)
                 err = hw_device_init_from_type(type, NULL, &dev);
         } else {
+            /*推流一般走这里，例如1.mkv的推流命令dev返回是空*/
             dev = hw_device_match_by_codec(ist->dec);
             if (!dev) {
                 // No device for this codec, but not using generic hwaccel
                 // and therefore may well not need one - ignore.
+                // (这个编解码器没有设备，但没有使用通用的hwaccel，因此可能不需要一个 - 忽略)
                 return 0;
             }
         }
@@ -414,12 +443,27 @@ int hw_device_setup_for_decode(InputStream *ist)
     return 0;
 }
 
+/**
+ * @brief 设置AVCodecContext.hw_device_ctx
+ * @param ost 输出流
+ * @return 成功=0； 失败=负数
+*/
 int hw_device_setup_for_encode(OutputStream *ost)
 {
     HWDevice *dev;
 
+    /*1.找到编码器支持且用户硬件设备也支持的硬件设备*/
     dev = hw_device_match_by_codec(ost->enc);
     if (dev) {
+        /*1.1对dev->device_ref引用计数加1，
+        ost->enc_ctx->hw_device_ctx与dev->device_ref指向是相同的*/
+        /*ost->enc_ctx->hw_device_ctx的注释(对比ost->enc_ctx->hw_frames_ctx)：
+         AVHWDeviceContext的引用，描述将被硬件编码器/解码器使用的设备。引用由调用者设置，然后由libavcodec拥有(并释放)。
+         如果编解码器设备不需要硬件帧，或者使用的任何硬件帧都是由libavcodec内部分配的，那么应该使用这个选项。
+         如果用户希望提供任何用于编码器输入或解码器输出的帧，那么应该使用hw_frames_ctx来代替。当在get_format()中为解码器设置hw_frames_ctx时，
+         在解码相关的流段时，该字段将被忽略，但可以在一个接一个的get_format()调用中再次使用。
+         对于编码器和解码器，这个字段都应该在调用avcodec_open2()之前设置，并且之后不能写入。
+         请注意，一些解码器可能需要在最初设置该字段以支持hw_frames_ctx -在这种情况下，所有使用的帧上下文必须在相同的设备上创建。*/
         ost->enc_ctx->hw_device_ctx = av_buffer_ref(dev->device_ref);
         if (!ost->enc_ctx->hw_device_ctx)
             return AVERROR(ENOMEM);

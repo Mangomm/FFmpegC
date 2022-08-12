@@ -2271,14 +2271,19 @@ int check_stream_specifier(AVFormatContext *s, AVStream *st, const char *spec)
 }
 
 /**
- * @brief 将用户指定输入或者输出文件的编解码器选项转移到一个临时变量，然后通过返回值返回
+ * @brief 将用户指定输入或者输出文件的编解码器选项转移到一个临时变量，然后通过返回值返回.
+ * 注意，该函数能够将这些选项过滤到不同的媒体类型，因为有av_opt_find()。例如参数-level 3.1,
+ * 当音频流或者字幕流调用本函数时，因为音频和字幕的AVCodecContext的AVClass中的option表不带有这个选项，所以不会设置到ret中，
+ * 而当视频时，因为视频是有这个选项的，所以会被设置到ret字典。
+ * 所以说，当视频流调用时，只会将参数opts中，属于视频编解码器选项的进行返回，其余不属于视频类型的选项会被过滤掉。
+ *
  * @param opts 用户指定输入或者输出文件的编解码器选项
  * @param codec_id 编解码器id，只当codec为空时有用
  * @param s 输入或者输出文件的上下文，codec为空以及check_stream_specifier匹配流与媒体类型符时有用
  * @param st 流
  * @param codec 解码器或者是编码器
  *
- * @return 成功=返回用户指定输入或者输出文件的编解码器选项(不带流标识符)； 失败=程序退出
+ * @return 成功=将用户输入或者输出文件的编解码器选项，按照不同的媒体类型进行返回，并且不带流标识符； 失败=程序退出
  *
  * @note av_opt_find的源码有点复杂.
  */

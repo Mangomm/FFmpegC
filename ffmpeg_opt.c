@@ -2582,7 +2582,7 @@ static int open_output_file(OptionsContext *o, const char *filename)
            *_val:字符串的值将写在这里。
             返回：0成功，负数为失败。
         */
-        av_opt_eval_flags(oc, o, e->value, &format_flags);// 这个函数实现在源码好像找不到？？？
+        av_opt_eval_flags(oc, o, e->value, &format_flags);// 这个函数实现在源码找不到
     }
     if (o->bitexact) {
         format_flags |= AVFMT_FLAG_BITEXACT;
