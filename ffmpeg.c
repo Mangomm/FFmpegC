@@ -724,7 +724,7 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
         ost->frame_number++;
     }
 
-    /*2.没有写头或者写头失败的处理*/
+    /*2.没有写头或者写头失败，先将包缓存在复用队列*/
     if (!of->header_written) {
         AVPacket tmp_pkt = {0};
         /* the muxer is not initialized yet, buffer the packet(muxer尚未初始化，请缓冲该数据包) */
@@ -746,10 +746,28 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
             if (ret < 0)
                 exit_program(1);
         }
+        /*
+         * av_packet_make_refcounted(): 确保给定数据包所描述的数据被引用计数。
+         * @note 此函数不确保引用是可写的。 为此使用av_packet_make_writable。
+         * @see av_packet_ref.
+         * @see av_packet_make_writable.
+         * @param pkt 计算需要参考的PKT数据包.
+         * @return 成功为0，错误为负AVERROR。失败时，数据包不变。
+         */
         ret = av_packet_make_refcounted(pkt);
         if (ret < 0)
             exit_program(1);
-        av_packet_move_ref(&tmp_pkt, pkt);
+        av_packet_move_ref(&tmp_pkt, pkt);//所有权转移，源码很简单
+        /*
+         * av_fifo_generic_write(): 将数据从用户提供的回调提供给AVFifoBuffer。
+         * @param f 要写入的AVFifoBuffer.
+         * @param src 数据来源;非const，因为它可以被定义在func中的函数用作可修改的上下文.
+         * @param size 要写入的字节数.
+         * @param func 一般写函数;第一个参数是src，第二个参数是dest_buf，第三个参数是dest_buf_size.
+         * Func必须返回写入dest_buf的字节数，或<= 0表示没有更多可写入的数据。如果func为NULL, src将被解释为源数据的简单字节数组。
+         * @return 写入FIFO的字节数.
+         * av_fifo_generic_write()的源码不算难.
+         */
         av_fifo_generic_write(ost->muxing_queue, &tmp_pkt, sizeof(tmp_pkt), NULL);
         return;
     }
@@ -760,19 +778,49 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
 
     if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
         int i;
+        //关于下面获取q编码质量可参考https://blog.csdn.net/u012117034/article/details/123453863
+        /*
+         * av_packet_get_side_data():从packet获取side info.
+         * @param type 期待side information的类型
+         * @param size 用于存储side info大小的指针(可选)
+         * @return 如果存在数据，则指向数据的指针，否则为NULL.
+         * 源码很简单.
+        */
+        //获取编码质量状态的side data info
         uint8_t *sd = av_packet_get_side_data(pkt, AV_PKT_DATA_QUALITY_STATS,
                                               NULL);
+        //从sd中获取前32bit
+        /*AV_RL32(sd)的大概调用过程：
+         * 1)AV_RL(32, p)
+         * 2）而AV_RL的定义：
+         * #   define AV_RL(s, p)    AV_RN##s(p)
+         * 3）所以此时调用变成(##表示将参数与前后拼接)：
+         * AV_RN32(p)
+         * 4）而AV_RN32的定义：
+         * #   define AV_RN32(p) AV_RN(32, p)
+         * 5）而AV_RN的定义：
+         * #   define AV_RN(s, p) (*((const __unaligned uint##s##_t*)(p)))
+         * 所以最终就是取sd前32bit的内容.(这部分是我使用vscode看源码得出的，qt貌似会跳转的共用体，不太准？)
+         *
+         * 至于为什么要获取32bit，看AV_PKT_DATA_QUALITY_STATS枚举注释，这个信息会由编码器填充，
+         * 被放在side info的前32bit，然后第5个字节存放帧类型，第6个字节存放错误次数，
+         * 第7、8两字节为保留位，
+         * 后面剩余的8字节是sum of squared differences between encoder in and output.翻译是 编码器输入和输出之间差的平方和.
+        */
         ost->quality = sd ? AV_RL32(sd) : -1;
         ost->pict_type = sd ? sd[4] : AV_PICTURE_TYPE_NONE;
 
-        for (i = 0; i<FF_ARRAY_ELEMS(ost->error); i++) {
-            if (sd && i < sd[5])
-                ost->error[i] = AV_RL64(sd + 8 + 8*i);
+        for (i = 0; i<FF_ARRAY_ELEMS(ost->error); i++) {//error[]数组大小是4，i可能是0-4的值
+            if (sd && i < sd[5])//若错误次数大于0次以上，即表示有错误
+                ost->error[i] = AV_RL64(sd + 8 + 8*i);//sd+8应该是跳过quality+pict_type+保留位，但8*i未理解，留个疑问
             else
-                ost->error[i] = -1;
+                ost->error[i] = -1;//没有错误
         }
 
+        //是否通过帧率对duration重写
         if (ost->frame_rate.num && ost->is_cfr) {
+            //(通过帧速率覆盖数据包持续时间，这应该不会发生)
+            //av_rescale_q的作用看init_output_stream_encode的注释.就是将参2转成参3的单位
             if (pkt->duration > 0)
                 av_log(NULL, AV_LOG_WARNING, "Overriding packet duration by frame rate, this should not happen\n");
             pkt->duration = av_rescale_q(1, av_inv_q(ost->frame_rate),
@@ -3628,7 +3676,7 @@ static int init_output_stream_encode(OutputStream *ost)
         }
 
         /*将forced_kf_pts由单位AV_TIME_BASE_Q转成enc_ctx->time_base的时基单位.暂未深入研究
-         * av_rescale_q()的原理：加上要转的pts=a，时基1{x1,y1}，时基2{x2,y2};
+         * av_rescale_q()的原理：假设要转的pts=a，时基1{x1,y1}，时基2{x2,y2};
          * 因为转化前后的比是一样的，设转换后的pts=b，那么有a*x1/y1=b*x2/y2; 化简：
          * b=(a*x1*y2)/(y1*x2).
          * 对比注释，a * bq / cq这句话实际上看不出来，我们看源码验证上面：

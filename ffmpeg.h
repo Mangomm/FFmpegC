@@ -51,7 +51,7 @@
 #define VSYNC_CFR         1
 #define VSYNC_VFR         2
 #define VSYNC_VSCFR       0xfe
-#define VSYNC_DROP        0xff
+#define VSYNC_DROP        0xff      // 音视频同步时，允许drop帧？
 
 #define MAX_STREAMS 1024    /* arbitrary sanity check value */
 
@@ -556,7 +556,7 @@ typedef struct OutputStream {
     uint64_t samples_encoded;
 
     /* packet quality factor */
-    int quality;
+    int quality;                        // 编码质量，等价于ffmpeg命令行打印的q
 
     int max_muxing_queue_size;          // 默认最大复用队列的大小为128，new_output_stream时指定
 
@@ -564,10 +564,10 @@ typedef struct OutputStream {
     AVFifoBuffer *muxing_queue;         // new_output_stream时开辟内存.
 
     /* packet picture type */
-    int pict_type;
+    int pict_type;                      //
 
     /* frame encode sum of squared error values */
-    int64_t error[4];
+    int64_t error[4];                   // 用于存储编码时的错误
 } OutputStream;
 
 typedef struct OutputFile {
