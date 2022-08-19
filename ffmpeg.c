@@ -1158,6 +1158,7 @@ static void do_subtitle_out(OutputFile *of,
     }
 }
 
+//test
 static void do_video_out(OutputFile *of,
                          OutputStream *ost,
                          AVFrame *next_picture,
@@ -1458,6 +1459,8 @@ error:
     av_log(NULL, AV_LOG_FATAL, "Video encoding failed\n");
     exit_program(1);
 }
+
+//test end
 
 static double psnr(double d)
 {
