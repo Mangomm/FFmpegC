@@ -49,7 +49,7 @@
 #define VSYNC_AUTO       -1
 #define VSYNC_PASSTHROUGH 0
 #define VSYNC_CFR         1
-#define VSYNC_VFR         2
+#define VSYNC_VFR         2         // 可变帧率
 #define VSYNC_VSCFR       0xfe
 #define VSYNC_DROP        0xff      // 音视频同步时，允许drop帧？
 
@@ -467,6 +467,9 @@ typedef struct OutputStream {
        for A/V sync */
     struct InputStream *sync_ist; /* input stream to sync against */
     int64_t sync_opts;       /* output frame counter, could be changed to some true timestamp */ // FIXME look at frame_number
+                             /* 输出帧计数器，可以更改为一些真实的时间戳. FIXME：查看frame_number */
+                             //同步输出pts？
+
     /* pts of the first frame encoded for this stream, used for limiting
      * recording time */
     int64_t first_pts;
@@ -494,7 +497,7 @@ typedef struct OutputStream {
 
     /* video only */
     AVRational frame_rate;              // 帧率，由OptionsContext.frame_rates即-r选项得到
-    int is_cfr;
+    int is_cfr;                         // 当format_video_sync 等于 VSYNC_CFR或者VSYNC_VSCFR时，为1.
     int force_fps;
     int top_field_first;
     int rotate_overridden;
@@ -616,7 +619,7 @@ extern int do_benchmark_all;
 extern int do_deinterlace;
 extern int do_hex_dump;
 extern int do_pkt_dump;
-extern int copy_ts;
+extern int copy_ts;// -copyts选项，默认0
 extern int start_at_zero;
 extern int copy_tb;
 extern int debug_ts;

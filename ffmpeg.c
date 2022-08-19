@@ -1158,7 +1158,6 @@ static void do_subtitle_out(OutputFile *of,
     }
 }
 
-//test
 static void do_video_out(OutputFile *of,
                          OutputStream *ost,
                          AVFrame *next_picture,
@@ -1179,66 +1178,105 @@ static void do_video_out(OutputFile *of,
     if (ost->source_index >= 0)
         ist = input_streams[ost->source_index];
 
+    /*1.获取duration.其中获取duration会参考以下3种方法，duration是可能被重写的
+     * 单位最终都被转成enc->time_base.
+     */
+    /*1.1通过过滤器里面的帧率得到duration*/
     frame_rate = av_buffersink_get_frame_rate(filter);
     if (frame_rate.num > 0 && frame_rate.den > 0)
+        /*
+         * 我们在init_output_stream_encode()调用init_encoder_time_base()看到，以视频为例，
+         * AVCodecContext->time_base是由帧率的倒数赋值的，所以这里求出的duration基本是1*/
         duration = 1/(av_q2d(frame_rate) * av_q2d(enc->time_base));
 
+    /*1.2若用户指定-r帧率选项，则通过用户的-r选项得到duration*/
     if(ist && ist->st->start_time != AV_NOPTS_VALUE && ist->st->first_dts != AV_NOPTS_VALUE && ost->frame_rate.num)
         duration = FFMIN(duration, 1/(av_q2d(ost->frame_rate) * av_q2d(enc->time_base)));
 
-    if (!ost->filters_script &&
-        !ost->filters &&
-        (nb_filtergraphs == 0 || !filtergraphs[0]->graph_desc) &&
-        next_picture &&
-        ist &&
-        lrintf(next_picture->pkt_duration * av_q2d(ist->st->time_base) / av_q2d(enc->time_base)) > 0) {
+    /*1.3通过pkt中的pkt_duration得到duration*/
+    if (!ost->filters_script &&                 /*过滤器脚本为空*/
+        !ost->filters &&                        /*过滤器字符串为空*/
+        (nb_filtergraphs == 0 || !filtergraphs[0]->graph_desc) && /*过滤器数为空或者第一个FilterGraph的graph_desc为空*/
+        next_picture && /*帧已经开辟内存*/
+        ist &&      /*输入流存在*/
+        lrintf(next_picture->pkt_duration * av_q2d(ist->st->time_base) / av_q2d(enc->time_base)) > 0) /*求出的duration合法*/
+    {
+        /* lrintf()是四舍五入函数.
+         * next_picture->pkt_duration：对应packet的持续时间，以AVStream->time_base单位表示，如果未知则为0。
+         * 下面是利用两个比相等求出的：d1/t1=d2/t2，假设pkt_duration=40，ist->st->time_base={1,1000},enc->time_base={1,25}
+         * 那么next_picture->pkt_duration * av_q2d(ist->st->time_base)得到的就是40/1000;也就是d1/t1，
+         * 而除以1/25，那么就变成乘以25，最终得到式子d2=(d1*t2)/t1，即d2=(40*25)/1000。
+         * 单位变成编码器的时基.
+         */
         duration = lrintf(next_picture->pkt_duration * av_q2d(ist->st->time_base) / av_q2d(enc->time_base));
     }
 
     if (!next_picture) {
         //end, flushing
+        /*一段汇编代码，取中值？一般不会进来.
+         * 但在reap_filters的av_buffersink_get_frame_flags调用失败时，
+         * flush=1且是文件末尾，并是视频类型时，会传next_picture=NULL进来.
+         * 可以全局搜一下do_video_out函数，只在两处地方被调用.
+         */
         nb0_frames = nb_frames = mid_pred(ost->last_nb0_frames[0],
                                           ost->last_nb0_frames[1],
                                           ost->last_nb0_frames[2]);
     } else {
+        /*delta0是输入帧(next_picture)与输出帧之间的“漂移”*/
         delta0 = sync_ipts - ost->sync_opts; // delta0 is the "drift" between the input frame (next_picture) and where it would fall in the output.
         delta  = delta0 + duration;
 
-        /* by default, we output a single frame */
+        /* by default, we output a single frame(默认情况下，我们输出单个帧). */
         nb0_frames = 0; // tracks the number of times the PREVIOUS frame should be duplicated, mostly for variable framerate (VFR)
+                        // (跟踪前一帧应该被复制的次数，主要是为了可变帧率(VFR))
         nb_frames = 1;
 
-        format_video_sync = video_sync_method;
+        /*选项视频同步格式*/
+        format_video_sync = video_sync_method;//video_sync_method默认是-1(VSYNC_AUTO)
+        //自动选择视频同步格式
         if (format_video_sync == VSYNC_AUTO) {
             if(!strcmp(of->ctx->oformat->name, "avi")) {
-                format_video_sync = VSYNC_VFR;
+                format_video_sync = VSYNC_VFR;//输出格式是avi，使用可变帧率.
             } else
-                format_video_sync = (of->ctx->oformat->flags & AVFMT_VARIABLE_FPS) ? ((of->ctx->oformat->flags & AVFMT_NOTIMESTAMPS) ? VSYNC_PASSTHROUGH : VSYNC_VFR) : VSYNC_CFR;
+                /*1.输出文件格式允许可变帧率：
+                    1）输出文件格式也允许没有时间戳，则视频同步格式为VSYNC_PASSTHROUGH。
+                    2）输出文件格式不允许没有时间戳，则视频同步格式为VSYNC_VFR。(正常走这里)
+                  2.输出文件格式不允许可变帧率，则为VSYNC_CFR。*/
+                format_video_sync = (of->ctx->oformat->flags & AVFMT_VARIABLE_FPS) ?
+                            ((of->ctx->oformat->flags & AVFMT_NOTIMESTAMPS) ? VSYNC_PASSTHROUGH : VSYNC_VFR) : VSYNC_CFR;
+
+            //如果是VSYNC_CFR才会往下走
             if (   ist
                 && format_video_sync == VSYNC_CFR
-                && input_files[ist->file_index]->ctx->nb_streams == 1
-                && input_files[ist->file_index]->input_ts_offset == 0) {
+                && input_files[ist->file_index]->ctx->nb_streams == 1   //输入流只有1个
+                && input_files[ist->file_index]->input_ts_offset == 0)  //留个疑问？
+            {
                 format_video_sync = VSYNC_VSCFR;
             }
-            if (format_video_sync == VSYNC_CFR && copy_ts) {
+            if (format_video_sync == VSYNC_CFR && copy_ts) {//-copyts选项
                 format_video_sync = VSYNC_VSCFR;
             }
         }
+
         ost->is_cfr = (format_video_sync == VSYNC_CFR || format_video_sync == VSYNC_VSCFR);
 
-        if (delta0 < 0 &&
-            delta > 0 &&
+        //控制sync_ipts、sync_opts的差距
+        //sync_ipts、sync_opts的具体意义需要后续研究
+        if (delta0 < 0 && /* sync_ipts落后于ost->sync_opts */
+            delta > 0 &&  /* delta0此时为负，而根据上面delta的计算，此时delta0 + duration需要是一个正数 */
             format_video_sync != VSYNC_PASSTHROUGH &&
             format_video_sync != VSYNC_DROP) {
             if (delta0 < -0.6) {
                 av_log(NULL, AV_LOG_VERBOSE, "Past duration %f too large\n", -delta0);
             } else
-                av_log(NULL, AV_LOG_DEBUG, "Clipping frame in rate conversion by %f\n", -delta0);
-            sync_ipts = ost->sync_opts;
-            duration += delta0;
+                av_log(NULL, AV_LOG_DEBUG, "Clipping frame in rate conversion by %f\n", -delta0);//裁剪帧的速率转换为-delta0
+                //av_log(NULL, AV_LOG_INFO, "Clipping frame in rate conversion by %f\n", -delta0);//裁剪帧的速率转换为-delta0
+            sync_ipts = ost->sync_opts;//使sync_ipts追上sync_opts
+            duration += delta0;//那么此时，时长应该减去追上的那一段，即delta0，因为输入与输出的差就是delta0.
             delta0 = 0;
         }
 
+        //后续研究
         switch (format_video_sync) {
         case VSYNC_VSCFR:
             if (ost->frame_number == 0 && delta0 >= 0.5) {
@@ -1259,11 +1297,12 @@ static void do_video_out(OutputFile *of,
                     nb0_frames = lrintf(delta0 - 0.6);
             }
             break;
-        case VSYNC_VFR:
-            if (delta <= -0.6)
+        case VSYNC_VFR://主要研究这里
+            if (delta <= -0.6)//delta是个负数，不会进入上面的if控制语句，那么由上面语句代入delta计算得到：sync_opts - sync_ipts - duration >= 0.6
+                              //意思是输出比输入超过一帧，且还有0.6s剩余？
                 nb_frames = 0;
-            else if (delta > 0.6)
-                ost->sync_opts = lrint(sync_ipts);
+            else if (delta > 0.6)//需要考虑上面的if语句，sync_ipts - sync_opts + duration > 0.6
+                ost->sync_opts = lrint(sync_ipts);//这里不太清楚，留个疑问
             break;
         case VSYNC_DROP:
         case VSYNC_PASSTHROUGH:
@@ -1272,14 +1311,18 @@ static void do_video_out(OutputFile *of,
         default:
             av_assert0(0);
         }
-    }
+    }//<== else end ==>
 
-    nb_frames = FFMIN(nb_frames, ost->max_frames - ost->frame_number);
+    nb_frames = FFMIN(nb_frames, ost->max_frames - ost->frame_number);//frame_number>=最大帧数，nb_frames将会是0或者负数
     nb0_frames = FFMIN(nb0_frames, nb_frames);
 
+    //将数组的第一、第二个元素拷贝到第二、第三个元素的位置.
+    //注，因为这里在拷贝第一个元素时，会将第二个元素的内容覆盖，
+    //所以绝对不能使用memcpy，只能使用memmove，因为它能确保拷贝之前将重复的内存先拷贝到目的地址。
+    //see https://www.runoob.com/cprogramming/c-function-memmove.html.
     memmove(ost->last_nb0_frames + 1,
             ost->last_nb0_frames,
-            sizeof(ost->last_nb0_frames[0]) * (FF_ARRAY_ELEMS(ost->last_nb0_frames) - 1));
+            sizeof(ost->last_nb0_frames[0]) * (FF_ARRAY_ELEMS(ost->last_nb0_frames) - 1));//与memcpy一样，但更安全
     ost->last_nb0_frames[0] = nb0_frames;
 
     if (nb0_frames == 0 && ost->last_dropped) {
@@ -1460,13 +1503,11 @@ error:
     exit_program(1);
 }
 
-//test end
 
 static double psnr(double d)
 {
     return -10.0 * log10(d);
 }
-//test nihao
 
 static void do_video_stats(OutputStream *ost, int frame_size)
 {
