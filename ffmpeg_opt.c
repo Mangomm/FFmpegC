@@ -106,7 +106,7 @@ int do_pkt_dump       = 0;
 int copy_ts           = 0;
 int start_at_zero     = 0;
 int copy_tb           = -1;
-int debug_ts          = 0;
+int debug_ts          = 0;  // 是否打印相关时间戳.-debug_ts选项
 int exit_on_error     = 0;
 int abort_on_flags    = 0;
 int print_stats       = -1;
@@ -3197,6 +3197,7 @@ loop_end:
     if (!o->metadata_global_manual && nb_input_files){
         av_dict_copy(&oc->metadata, input_files[0]->ctx->metadata,
                      AV_DICT_DONT_OVERWRITE);
+        //av_dict_set(&oc->metadata, "MAJOR_BRAND", "cwj", 0);
         if(o->recording_time != INT64_MAX)
             av_dict_set(&oc->metadata, "duration", NULL, 0);
         av_dict_set(&oc->metadata, "creation_time", NULL, 0);

@@ -149,7 +149,7 @@ typedef struct OptionsContext {
 
     int64_t recording_time;
     int64_t stop_time;
-    uint64_t limit_filesize;
+    uint64_t limit_filesize;    // -fs选项，设置文件大小限制
     float mux_preload;
     float mux_max_delay;        // -muxdelay选项，在init_options()看到默认0.7
     int shortest;               // -shortest选项
@@ -248,7 +248,7 @@ typedef struct InputFilter {
     */
     AVFifoBuffer *frame_queue;          // 输入过滤器帧队列的大小；初始化时是8帧，av_fifo_alloc(8 * sizeof(AVFrame*))。
 
-    // parameters configured for this input
+    // parameters configured for this input(为此输入配置的参数)
     int format;
 
     int width, height;
@@ -264,7 +264,7 @@ typedef struct InputFilter {
 } InputFilter;
 
 typedef struct OutputFilter {
-    AVFilterContext     *filter;                //
+    AVFilterContext     *filter;                // 输出过滤器ctx
     struct OutputStream *ost;                   // 输出流
     struct FilterGraph  *graph;                 // 指向FilterGraph封装的系统过滤器
     uint8_t             *name;
@@ -367,7 +367,7 @@ typedef struct InputStream {
     /* decoded data from this stream goes into all those filters
      * currently video and audio only */
     InputFilter **filters;                      // 对比输出流OutputStream可以看到，输入流可以有多个输入过滤器，因为输出流的filters是一级指针，而这里输入流是二级指针
-    int        nb_filters;
+    int        nb_filters;                      // **filters数组元素个数
 
     int reinit_filters;
 
@@ -405,7 +405,7 @@ typedef struct InputStream {
 typedef struct InputFile {
     AVFormatContext *ctx; // 输入文件的ctx
     int eof_reached;      /* true if eof reached */
-    int eagain;           /* true if last read attempt returned EAGAIN */
+    int eagain;           /* true if last read attempt returned EAGAIN(如果上次读取尝试返回EAGAIN则为真) */
     int ist_index;        /* index of first stream in input_streams *///输入文件中第一个流的下标,一般为0
     int loop;             /* set number of times input stream should be looped *///循环次数.例如无限次,-stream_loop -1
     int64_t duration;     /* actual duration of the longest stream in a file
@@ -425,9 +425,9 @@ typedef struct InputFile {
     int accurate_seek;
 
 #if HAVE_THREADS
-    AVThreadMessageQueue *in_thread_queue;
+    AVThreadMessageQueue *in_thread_queue;      // 该输入文件的线程消息队列
     pthread_t thread;           /* thread reading from this file */
-    int non_blocking;           /* reading packets from the thread should not block */
+    int non_blocking;           /* reading packets from the thread should not block(从线程读取数据包不应该被阻塞) */
     int joined;                 /* the thread has been joined */
     int thread_queue_size;      /* maximum number of queued packets */
 #endif
@@ -471,7 +471,7 @@ typedef struct OutputStream {
      * recording time */
     int64_t first_pts;
     /* dts of the last packet sent to the muxer */
-    int64_t last_mux_dts;
+    int64_t last_mux_dts;       // 发送到muxer的最后一个包的DTS，即最近有效的dts
     // the timebase of the packets sent to the muxer
     AVRational mux_timebase;    // 发送到muxer的数据包的时间基准
     AVRational enc_timebase;    // 由OptionsContext.enc_time_bases参数解析得到
@@ -485,7 +485,7 @@ typedef struct OutputStream {
 
     AVCodec *enc;               // 通过choose_encoder得到的编码器
     int64_t max_frames;         // 通过OptionsContext.max_frames得到
-    AVFrame *filtered_frame;
+    AVFrame *filtered_frame;    // 在reap_filters时会给其开辟内存
     AVFrame *last_frame;
     int last_dropped;
     int last_nb0_frames[3];
@@ -528,7 +528,7 @@ typedef struct OutputStream {
     AVDictionary *swr_opts;
     AVDictionary *resample_opts;
     char *apad;
-    OSTFinished finished;               /* no more packets should be written for this stream */
+    OSTFinished finished;               /* no more packets should be written for this stream(写帧失败，不应该再为该流写入任何信息包) */
     int unavailable;                    /* true if the steram is unavailable (possibly temporarily) */
     int stream_copy;                    // 是否不转码输出，例如-vcodec copy选项.0=转码 1=不转码.只要置为0，音视频都会进入转码的流程。see choose_encoder()
 
@@ -548,7 +548,7 @@ typedef struct OutputStream {
 
     /* stats */
     // combined size of all the packets written
-    uint64_t data_size;
+    uint64_t data_size;                 // 写入的所有数据包的组合大小
     // number of packets send to the muxer
     uint64_t packets_written;
     // number of frames/samples sent to the encoder
@@ -576,7 +576,7 @@ typedef struct OutputFile {
     int ost_index;          /* index of the first stream in output_streams */
     int64_t recording_time;  ///< desired length of the resulting file in microseconds == AV_TIME_BASE units
     int64_t start_time;      ///< start time in microseconds == AV_TIME_BASE units
-    uint64_t limit_filesize; /* filesize limit expressed in bytes */
+    uint64_t limit_filesize; /* filesize limit expressed in bytes(文件大小限制，以字节为单位),-fs选项.*/
 
     int shortest;
 

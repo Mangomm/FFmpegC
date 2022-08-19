@@ -1240,6 +1240,11 @@ int ist_in_filtergraph(FilterGraph *fg, InputStream *ist)
     return 0;
 }
 
+/**
+ * @brief 判断FilterGraph的graph_desc描述是否为空.
+ * @param fg ffmpeg封装的系统过滤器
+ * @return =1 graph_desc为空；=0 graph_desc不为空
+*/
 int filtergraph_is_simple(FilterGraph *fg)
 {
     return !fg->graph_desc;
