@@ -1466,6 +1466,7 @@ static double psnr(double d)
 {
     return -10.0 * log10(d);
 }
+//test nihao
 
 static void do_video_stats(OutputStream *ost, int frame_size)
 {
