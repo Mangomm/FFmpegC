@@ -92,7 +92,7 @@ char *sdp_filename;
 
 float audio_drift_threshold = 0.1;
 float dts_delta_threshold   = 10;
-float dts_error_threshold   = 3600*30;
+float dts_error_threshold   = 3600*30;//帧能被解码的最大阈值大小？
 
 int audio_volume      = 256;
 int audio_sync_method = 0;
@@ -100,7 +100,7 @@ int video_sync_method = VSYNC_AUTO;
 float frame_drop_threshold = 0;
 int do_deinterlace    = 0;
 int do_benchmark      = 0;
-int do_benchmark_all  = 0;
+int do_benchmark_all  = 0;  // -benchmark_all选项，默认0
 int do_hex_dump       = 0;
 int do_pkt_dump       = 0;
 int copy_ts           = 0;

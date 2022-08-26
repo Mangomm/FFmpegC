@@ -951,13 +951,25 @@ static void close_output_stream(OutputStream *ost)
  * therefore flush any delayed packets to the output.  A blank packet
  * must be supplied in this case.
  */
+/*(向输出发送单个包，应用与输出流相关的任何位流过滤器。这可能会导致实际写入任意数量的数据包，具体取决于应用了什么位流过滤器。
+ * 当此函数返回时，所提供的包将被消耗，并且为空(就像新分配的一样)。
+ * 如果设置了eof，则将eof指示为所有位流过滤器，因此将任何延迟的数据包刷新到输出。
+ * 在这种情况下，必须提供一个空白包)*/
+/**
+ * @brief write_packet.按照有位流和无位流的流程，不难.
+ * @param of 输出文件
+ * @param pkt 编码后的包
+ * @param ost 输出流
+ * @param eof eof
+*/
 static void output_packet(OutputFile *of, AVPacket *pkt,
                           OutputStream *ost, int eof)
 {
     int ret = 0;
 
-    /* apply the output bitstream filters, if any */
-    if (ost->nb_bitstream_filters) {
+    /* apply the output bitstream filters, if any.(如果有的话，应用输出位流过滤器) */
+    // 1. 有位流的写包流程
+    if (ost->nb_bitstream_filters) {//推流没用到,暂未研究
         int idx;
 
         ret = av_bsf_send_packet(ost->bsf_ctx[0], eof ? NULL : pkt);
@@ -990,7 +1002,7 @@ static void output_packet(OutputFile *of, AVPacket *pkt,
             else
                 write_packet(of, pkt, ost, 0);
         }
-    } else if (!eof)
+    } else if (!eof)//没位流的流程, 且eof=0. 没位流 且 eof=1时，该函数不处理任何东西
         write_packet(of, pkt, ost, 0);
 
 finish:
@@ -1006,6 +1018,7 @@ static int check_recording_time(OutputStream *ost)
 {
     OutputFile *of = output_files[ost->file_index];
 
+    //当前的时长已经大于等于用户要录像的时长，则给该输出流标记ENCODER_FINISHED，翻返回0；否则返回1？
     if (of->recording_time != INT64_MAX &&
         av_compare_ts(ost->sync_opts - ost->first_pts, ost->enc_ctx->time_base, of->recording_time,
                       AV_TIME_BASE_Q) >= 0) {
@@ -1325,6 +1338,7 @@ static void do_video_out(OutputFile *of,
             sizeof(ost->last_nb0_frames[0]) * (FF_ARRAY_ELEMS(ost->last_nb0_frames) - 1));//与memcpy一样，但更安全
     ost->last_nb0_frames[0] = nb0_frames;
 
+    //暂不太清楚下面的意思,后续研究
     if (nb0_frames == 0 && ost->last_dropped) {
         nb_frames_drop++;
         av_log(NULL, AV_LOG_VERBOSE,
@@ -1332,6 +1346,7 @@ static void do_video_out(OutputFile *of,
                ost->frame_number, ost->st->index, ost->last_frame->pts);
     }
     if (nb_frames > (nb0_frames && ost->last_dropped) + (nb_frames > nb0_frames)) {
+        //帧太大会drop掉
         if (nb_frames > dts_error_threshold * 30) {
             av_log(NULL, AV_LOG_ERROR, "%d frame duplication too large, skipping\n", nb_frames - 1);
             nb_frames_drop++;
@@ -1341,7 +1356,7 @@ static void do_video_out(OutputFile *of,
         av_log(NULL, AV_LOG_VERBOSE, "*** %d dup!\n", nb_frames - 1);
         if (nb_frames_dup > dup_warning) {
             av_log(NULL, AV_LOG_WARNING, "More than %d frames duplicated\n", dup_warning);
-            dup_warning *= 10;
+            dup_warning *= 10;//复制超过一定数量会提示，并且下一次提示是本次的10倍？
         }
     }
     ost->last_dropped = nb_frames == nb0_frames && next_picture;
@@ -1355,6 +1370,7 @@ static void do_video_out(OutputFile *of,
         pkt.data = NULL;
         pkt.size = 0;
 
+        //in_picture第一次进来指向首帧，后续指向上一帧？
         if (i < nb0_frames && ost->last_frame) {
             in_picture = ost->last_frame;
         } else
@@ -1368,11 +1384,14 @@ static void do_video_out(OutputFile *of,
         if (!check_recording_time(ost))
             return;
 
+        //包含两个宏其中之一 并且 top_field_first>=0
+        //AV_CODEC_FLAG_INTERLACED_DCT指隔行扫描？AV_CODEC_FLAG_INTERLACED_ME注释是：交错运动估计
         if (enc->flags & (AV_CODEC_FLAG_INTERLACED_DCT | AV_CODEC_FLAG_INTERLACED_ME) &&
             ost->top_field_first >= 0)
-            in_picture->top_field_first = !!ost->top_field_first;
+            in_picture->top_field_first = !!ost->top_field_first;//如果内容是交错的，则首先显示顶部字段。
 
-        if (in_picture->interlaced_frame) {
+        //设置field_order。field_order: 交错视频中的场的顺序。
+        if (in_picture->interlaced_frame) {//图片的内容是交错的
             if (enc->codec->id == AV_CODEC_ID_MJPEG)
                 mux_par->field_order = in_picture->top_field_first ? AV_FIELD_TT:AV_FIELD_BB;
             else
@@ -1380,20 +1399,23 @@ static void do_video_out(OutputFile *of,
         } else
             mux_par->field_order = AV_FIELD_PROGRESSIVE;
 
-        in_picture->quality = enc->global_quality;
-        in_picture->pict_type = 0;
+        in_picture->quality = enc->global_quality;//编解码器的全局质量，无法按帧更改。这应该与MPEG-1/2/4 qscale成比例。
+        in_picture->pict_type = 0;//Picture type of the frame.
 
+        //利用AVFrame的pts给ost->forced_kf_ref_pts赋值
         if (ost->forced_kf_ref_pts == AV_NOPTS_VALUE &&
             in_picture->pts != AV_NOPTS_VALUE)
             ost->forced_kf_ref_pts = in_picture->pts;
 
+        //单位转成秒？此时的in_picture->pts - ost->forced_kf_ref_pts单位都是enc->time_base？留个疑问
         pts_time = in_picture->pts != AV_NOPTS_VALUE ?
             (in_picture->pts - ost->forced_kf_ref_pts) * av_q2d(enc->time_base) : NAN;
+
         if (ost->forced_kf_index < ost->forced_kf_count &&
-            in_picture->pts >= ost->forced_kf_pts[ost->forced_kf_index]) {
+            in_picture->pts >= ost->forced_kf_pts[ost->forced_kf_index]) {//正常流程不会进来
             ost->forced_kf_index++;
             forced_keyframe = 1;
-        } else if (ost->forced_keyframes_pexpr) {
+        } else if (ost->forced_keyframes_pexpr) {//正常流程不会进来
             double res;
             ost->forced_keyframes_expr_const_values[FKF_T] = pts_time;
             res = av_expr_eval(ost->forced_keyframes_pexpr,
@@ -1417,16 +1439,16 @@ static void do_video_out(OutputFile *of,
             ost->forced_keyframes_expr_const_values[FKF_N] += 1;
         } else if (   ost->forced_keyframes
                    && !strncmp(ost->forced_keyframes, "source", 6)
-                   && in_picture->key_frame==1) {
+                   && in_picture->key_frame==1) {//正常流程不会进来
             forced_keyframe = 1;
         }
 
-        if (forced_keyframe) {
+        if (forced_keyframe) {//正常流程不会进来
             in_picture->pict_type = AV_PICTURE_TYPE_I;
             av_log(NULL, AV_LOG_DEBUG, "Forced keyframe at time %f\n", pts_time);
         }
 
-        update_benchmark(NULL);
+        update_benchmark(NULL);//没有指定选项-benchmark_all，可忽略
         if (debug_ts) {
             av_log(NULL, AV_LOG_INFO, "encoder <- type:video "
                    "frame_pts:%s frame_pts_time:%s time_base:%d/%d\n",
@@ -1434,19 +1456,23 @@ static void do_video_out(OutputFile *of,
                    enc->time_base.num, enc->time_base.den);
         }
 
-        ost->frames_encoded++;
+        ost->frames_encoded++;//统计发送到编码器的帧个数
 
+        //将帧发送到编码器
         ret = avcodec_send_frame(enc, in_picture);
         if (ret < 0)
             goto error;
-        // Make sure Closed Captions will not be duplicated
+
+        // Make sure Closed Captions will not be duplicated(确保不会重复关闭字幕)
+        // av_frame_remove_side_data(): 如果frame中存在所提供类型的边数据，请将其释放并从frame中删除
         av_frame_remove_side_data(in_picture, AV_FRAME_DATA_A53_CC);
 
+        //循环从编码器中读取编码后的帧
         while (1) {
             ret = avcodec_receive_packet(enc, &pkt);
             update_benchmark("encode_video %d.%d", ost->file_index, ost->index);
             if (ret == AVERROR(EAGAIN))
-                break;
+                break;//一般每次读完一个pkt会从这里退出while
             if (ret < 0)
                 goto error;
 
@@ -1457,9 +1483,22 @@ static void do_video_out(OutputFile *of,
                        av_ts2str(pkt.dts), av_ts2timestr(pkt.dts, &enc->time_base));
             }
 
+            /* AV_CODEC_CAP_DELAY:
+             * 编码器或解码器需要在末尾使用NULL输入进行刷新，以便提供完整和正确的输出。
+             * NOTE: 如果没有设置此标志，则保证编解码器永远不会输入NULL数据。用户仍然可以向公共编码或解码函数发送NULL数据，
+             * 但libavcodec不会将其传递给编解码器，除非设置了此标志。
+             *
+             * Decoders: 解码器有一个非零延迟，需要在最后用avpkt->data=NULL, avpkt->size=0来获得延迟的数据，直到解码器不再返回帧。
+             * Encoders: 编码器需要在编码结束时提供NULL数据，直到编码器不再返回数据。
+             *
+             * NOTE: 对于实现AVCodec.encode2()函数的编码器，设置此标志还意味着编码器必须设置每个输出包的pts和持续时间。
+             * 如果未设置此标志，则pts和持续时间将由libavcodec从输入帧中确定。
+            */
+            //编码后的pkt.pts为空 且 编码器能力集不包含AV_CODEC_CAP_DELAY
             if (pkt.pts == AV_NOPTS_VALUE && !(enc->codec->capabilities & AV_CODEC_CAP_DELAY))
                 pkt.pts = ost->sync_opts;
 
+            //将编码后的时基转成复用时基,这里需要留意
             av_packet_rescale_ts(&pkt, enc->time_base, ost->mux_timebase);
 
             if (debug_ts) {
@@ -1473,10 +1512,11 @@ static void do_video_out(OutputFile *of,
             output_packet(of, &pkt, ost, 0);
 
             /* if two pass, output log */
-            if (ost->logfile && enc->stats_out) {
+            if (ost->logfile && enc->stats_out) {//忽略，推流没用到
                 fprintf(ost->logfile, "%s", enc->stats_out);
             }
-        }
+        }//<== while (1) end ==>
+
         ost->sync_opts++;
         /*
          * For video, number of frames in == number of packets out.

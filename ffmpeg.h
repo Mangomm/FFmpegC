@@ -499,7 +499,7 @@ typedef struct OutputStream {
     AVRational frame_rate;              // 帧率，由OptionsContext.frame_rates即-r选项得到
     int is_cfr;                         // 当format_video_sync 等于 VSYNC_CFR或者VSYNC_VSCFR时，为1.
     int force_fps;
-    int top_field_first;
+    int top_field_first;                // ?
     int rotate_overridden;
     double rotate_override_value;
 
@@ -509,7 +509,7 @@ typedef struct OutputStream {
     int64_t forced_kf_ref_pts;
     int64_t *forced_kf_pts;             // 强制关键帧pts数组.暂未深入研究
     int forced_kf_count;                // forced_kf_pts数组大小
-    int forced_kf_index;
+    int forced_kf_index;                // 当前关键帧下标？
     char *forced_keyframes;
     AVExpr *forced_keyframes_pexpr;
     double forced_keyframes_expr_const_values[FKF_NB];
@@ -555,6 +555,7 @@ typedef struct OutputStream {
     // number of packets send to the muxer
     uint64_t packets_written;
     // number of frames/samples sent to the encoder
+    //(发送到编码器的帧/样本数)
     uint64_t frames_encoded;
     uint64_t samples_encoded;
 
@@ -578,6 +579,8 @@ typedef struct OutputFile {
     AVDictionary *opts;     // 解复用选项，由o->g->format_opts拷贝得到.see open_output_file()
     int ost_index;          /* index of the first stream in output_streams */
     int64_t recording_time;  ///< desired length of the resulting file in microseconds == AV_TIME_BASE units
+                            //结果文件的期望长度(以微秒为单位)== AV_TIME_BASE单位.(录像时长？)
+
     int64_t start_time;      ///< start time in microseconds == AV_TIME_BASE units
     uint64_t limit_filesize; /* filesize limit expressed in bytes(文件大小限制，以字节为单位),-fs选项.*/
 
@@ -615,7 +618,7 @@ extern int audio_sync_method;
 extern int video_sync_method;
 extern float frame_drop_threshold;
 extern int do_benchmark;
-extern int do_benchmark_all;
+extern int do_benchmark_all;// -benchmark_all选项，默认0
 extern int do_deinterlace;
 extern int do_hex_dump;
 extern int do_pkt_dump;
