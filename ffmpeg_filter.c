@@ -202,7 +202,7 @@ DEF_CHOOSE_FORMAT(channel_layouts, uint64_t, channel_layout, channel_layouts, 0,
  * @return 成功=0 失败=程序退出
  *
  * @note 这个函数看到，虽然在FilterGraph的成员outputs、inputs都是二级指针，但都是只使用第一个元素，
- * 即下面看到fg->outputs[0]、fg->inputs[0]都是固定下标0，所以这个函数只被调用一次，实际上ffmpeg
+ * 即下面看到fg->outputs[0]、fg->inputs[0]都是固定下标0，所以这个函数只被调用一次(for循环为每个输出流调用一次)，实际上ffmpeg
  * 也是这样调的，读者可以自行搜索，看到该函数只会被调用一次.
 */
 int init_simple_filtergraph(InputStream *ist, OutputStream *ost)

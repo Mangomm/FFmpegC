@@ -1028,6 +1028,14 @@ static int check_recording_time(OutputStream *ost)
     return 1;
 }
 
+/**
+ * @brief 对frame进行编码，并进行写帧操作.
+ * @param of 输出文件
+ * @param ost 输出流
+ * @param frame 要编码的帧
+ * @return void.
+ * @note 成功或者输出流完成编码不返回任何内容, 失败程序退出.
+*/
 static void do_audio_out(OutputFile *of, OutputStream *ost,
                          AVFrame *frame)
 {
@@ -1039,12 +1047,19 @@ static void do_audio_out(OutputFile *of, OutputStream *ost,
     pkt.data = NULL;
     pkt.size = 0;
 
+    //1. 检查该输出流是否完成编码.主要与录像时长有关.
     if (!check_recording_time(ost))
         return;
 
+    //2. 输入帧为空，或者 audio_sync_method小于0，pts会参考ost->sync_opts
     if (frame->pts == AV_NOPTS_VALUE || audio_sync_method < 0)
         frame->pts = ost->sync_opts;
-    ost->sync_opts = frame->pts + frame->nb_samples;
+
+    //3. 根据当前帧的pts和nb_samples预估下一帧的pts。
+    ost->sync_opts = frame->pts + frame->nb_samples;//音频时,frame->pts的单位是采样点个数,例如采样点数是1024,采样频率是44.1k，那么就是0.23s.
+                                                    //可参考ffplay的decoder_decode_frame()注释
+
+    //4. 统计已经编码的采样点个数和帧数.
     ost->samples_encoded += frame->nb_samples;
     ost->frames_encoded++;
 
@@ -1057,11 +1072,14 @@ static void do_audio_out(OutputFile *of, OutputStream *ost,
                enc->time_base.num, enc->time_base.den);
     }
 
+    //5. 发送输入帧到编码器进行编码
     ret = avcodec_send_frame(enc, frame);
     if (ret < 0)
         goto error;
 
+    //6. 循环获取编码后的帧,并进行写帧
     while (1) {
+        //6.1 获取编码后的帧
         ret = avcodec_receive_packet(enc, &pkt);
         if (ret == AVERROR(EAGAIN))
             break;
@@ -1070,7 +1088,7 @@ static void do_audio_out(OutputFile *of, OutputStream *ost,
 
         update_benchmark("encode_audio %d.%d", ost->file_index, ost->index);
 
-        av_packet_rescale_ts(&pkt, enc->time_base, ost->mux_timebase);
+        av_packet_rescale_ts(&pkt, enc->time_base, ost->mux_timebase);//每次写帧前都会将pts转成复用的时基
 
         if (debug_ts) {
             av_log(NULL, AV_LOG_INFO, "encoder -> type:audio "
@@ -1079,6 +1097,7 @@ static void do_audio_out(OutputFile *of, OutputStream *ost,
                    av_ts2str(pkt.dts), av_ts2timestr(pkt.dts, &enc->time_base));
         }
 
+        //6.2 写帧
         output_packet(of, &pkt, ost, 0);
     }
 
@@ -1171,6 +1190,13 @@ static void do_subtitle_out(OutputFile *of,
     }
 }
 
+/**
+ * @brief 将next_picture编码成pkt，然后写帧
+ * @param of 输出文件
+ * @param ost 输出流
+ * @param next_picture 要编码的帧
+ * @param sync_ipts 要编码的帧的pts.即AVFrame->pts的值
+*/
 static void do_video_out(OutputFile *of,
                          OutputStream *ost,
                          AVFrame *next_picture,
@@ -1372,7 +1398,7 @@ static void do_video_out(OutputFile *of,
 
         //in_picture第一次进来指向首帧，后续指向上一帧？
         if (i < nb0_frames && ost->last_frame) {
-            in_picture = ost->last_frame;
+            in_picture = ost->last_frame;//这里正常不会进来
         } else
             in_picture = next_picture;
 
@@ -1508,8 +1534,8 @@ static void do_video_out(OutputFile *of,
                     av_ts2str(pkt.dts), av_ts2timestr(pkt.dts, &ost->mux_timebase));
             }
 
-            frame_size = pkt.size;
-            output_packet(of, &pkt, ost, 0);
+            frame_size = pkt.size;//记录当前帧大小
+            output_packet(of, &pkt, ost, 0);//内部会写帧
 
             /* if two pass, output log */
             if (ost->logfile && enc->stats_out) {//忽略，推流没用到
@@ -1523,19 +1549,23 @@ static void do_video_out(OutputFile *of,
          * But there may be reordering, so we can't throw away frames on encoder
          * flush, we need to limit them here, before they go into encoder.
          */
+        /* 对于视频，输入的帧数=输出的包数。但是可能会有重新排序，所以我们不能在编码器刷新时丢弃帧，
+         * 我们需要在它们进入编码器之前，在这里限制它们. */
         ost->frame_number++;
 
+        //打印视频相关信息，vstats_filename默认是NULL，默认不会进来
         if (vstats_filename && frame_size)
             do_video_stats(ost, frame_size);
-    }
+    }//<== for (i = 0; i < nb_frames; i++) end ==>
 
+    //将当前帧引用给last_frame
     if (!ost->last_frame)
         ost->last_frame = av_frame_alloc();
     av_frame_unref(ost->last_frame);
     if (next_picture && ost->last_frame)
         av_frame_ref(ost->last_frame, next_picture);
     else
-        av_frame_free(&ost->last_frame);
+        av_frame_free(&ost->last_frame);//next_picture为空会进入这里，因为last_frame在上面是av_frame_alloc的
 
     return;
 error:
@@ -1614,7 +1644,9 @@ static void finish_output_stream(OutputStream *ost)
  * @return  0 for success, <0 for severe errors
  */
 /**
- * @brief
+ * @brief 遍历每个输出流,从输出过滤器中获取一帧送去编码,然后进行写帧.
+ * @param flush =1时,会为视频清空编码器?但是在do_video_out的for循环会直接return?
+ * @return 成功=0, 失败返回负数或者程序退出.
 */
 static int reap_filters(int flush)
 {
@@ -1638,9 +1670,8 @@ static int reap_filters(int flush)
             continue;
         filter = ost->filter->filter;//输出过滤器ctx
 
-        /*1.2对还没调用init_output_stream()初始化的输出流，则调用。
-         * 一般视频、音频都是在这里初始化.内部主要是打开编解码器和写头。
-         */
+        /* 1.2对还没调用init_output_stream()初始化的输出流，则调用。
+         * 一般视频、音频都是在这里初始化.内部主要是打开编解码器和写头. */
         if (!ost->initialized) {
             char error[1024] = "";
             ret = init_output_stream(ost, error, sizeof(error));
@@ -1671,7 +1702,7 @@ static int reap_filters(int flush)
                            "Error in av_buffersink_get_frame_flags(): %s\n", av_err2str(ret));
                 } else if (flush && ret == AVERROR_EOF) {/*6.2flush=1且是文件末尾*/
                     if (av_buffersink_get_type(filter) == AVMEDIA_TYPE_VIDEO)
-                        do_video_out(of, ost, NULL, AV_NOPTS_VALUE);
+                        do_video_out(of, ost, NULL, AV_NOPTS_VALUE);//帧传NULL，进行flush
                 }
                 break;
             }
@@ -1679,27 +1710,43 @@ static int reap_filters(int flush)
                 av_frame_unref(filtered_frame);
                 continue;
             }
+
+            //计算float_pts、filtered_frame->pts的值.
+            //思路也不难:
+            //1)若用户指定start_time，则解码后的帧的显示时间戳需要减去start_time。
+            //例如本来3s显示该帧，假设用户start_time=1s，那么就应该在3-1=2s就显示该帧.
+            //2)若没指定，则值不会变.
+            //这两者求法是一样的，区别是float_pts用的tb.den被修改过，
+            //而filtered_frame->pts使用原来的enc->time_base去求，看ffmpeg的float_pts注释，区别是精度不一样。
             if (filtered_frame->pts != AV_NOPTS_VALUE) {
-                int64_t start_time = (of->start_time == AV_NOPTS_VALUE) ? 0 : of->start_time;
+                int64_t start_time = (of->start_time == AV_NOPTS_VALUE) ? 0 : of->start_time;//用户是否指定起始时间
                 AVRational filter_tb = av_buffersink_get_time_base(filter);
                 AVRational tb = enc->time_base;
+                // 1）av_clip(): 用来限制参1最终落在0~16的范围.
+                // 2）av_log2()(参考ffplay音频相关): 应该是对齐成2的n次方吧。
+                // 例如freq=8000，每秒30次，最终返回8.具体可以看源码是如何处理的。
+                // 大概估计是8k/30=266.6，2*2^7<266.7<2*2^8.然后向上取整，所以返回8。表达式是：av_log2(8000/30)=8;
+                // 44.1k/30=1470，2*2^9<1470<2*2^10.然后向上取整，所以返回10。表达式是：av_log2(44.1k/30)=10;
                 int extra_bits = av_clip(29 - av_log2(tb.den), 0, 16);
 
-                tb.den <<= extra_bits;
+                tb.den <<= extra_bits;//留个疑问
                 float_pts =
                     av_rescale_q(filtered_frame->pts, filter_tb, tb) -
-                    av_rescale_q(start_time, AV_TIME_BASE_Q, tb);
-                float_pts /= 1 << extra_bits;
+                    av_rescale_q(start_time, AV_TIME_BASE_Q, tb);//获取从开始到现在的时间差
+                float_pts /= 1 << extra_bits;//留个疑问
                 // avoid exact midoints to reduce the chance of rounding differences, this can be removed in case the fps code is changed to work with integers
-                float_pts += FFSIGN(float_pts) * 1.0 / (1<<17);
+                //(避免精确的中点以减少舍入差异的机会，这可以在FPS代码更改为使用整数时删除)
+                float_pts += FFSIGN(float_pts) * 1.0 / (1<<17);//FFSIGN宏很简单:就是取正负,但除以1<<17是啥意思?留个疑问
 
                 filtered_frame->pts =
                     av_rescale_q(filtered_frame->pts, filter_tb, enc->time_base) -
-                    av_rescale_q(start_time, AV_TIME_BASE_Q, enc->time_base);
+                    av_rescale_q(start_time, AV_TIME_BASE_Q, enc->time_base);//filtered_frame->pts单位变了，变成enc->time_base
             }
 
+            //将读到的帧进行编码
             switch (av_buffersink_get_type(filter)) {
             case AVMEDIA_TYPE_VIDEO:
+                //用户没指定输出流的宽高比，会使用帧的宽高比给编码器的宽高比赋值
                 if (!ost->frame_aspect_ratio.num)
                     enc->sample_aspect_ratio = filtered_frame->sample_aspect_ratio;
 
@@ -1713,8 +1760,9 @@ static int reap_filters(int flush)
                 do_video_out(of, ost, filtered_frame, float_pts);
                 break;
             case AVMEDIA_TYPE_AUDIO:
+                //AV_CODEC_CAP_PARAM_CHANGE: 编解码器支持在任何点更改参数。
                 if (!(enc->codec->capabilities & AV_CODEC_CAP_PARAM_CHANGE) &&
-                    enc->channels != filtered_frame->channels) {
+                    enc->channels != filtered_frame->channels) {//编码器不支持更改参数且编码器与要编码的帧不一样，那么不编码该帧.
                     av_log(NULL, AV_LOG_ERROR,
                            "Audio filter graph output is not normalized and encoder does not support parameter changes\n");
                     break;
@@ -1724,10 +1772,10 @@ static int reap_filters(int flush)
             default:
                 // TODO support subtitle filters
                 av_assert0(0);
-            }
+            }//<== switch (av_buffersink_get_type(filter)) end ==>
 
             av_frame_unref(filtered_frame);
-        }
+        }//<== while (1) end ==>
     }//<== for (i = 0; i < nb_output_streams; i++) end ==>
 
     return 0;
@@ -5331,6 +5379,15 @@ discard_packet:
  * @param[out] best_ist  input stream where a frame would allow to continue(输入流中的帧允许继续，传出参数)
  * @return  0 for success, <0 for error
  */
+/**
+ * @brief 从buffersink读取帧:
+ * 1)如果有帧,会调reap_filters进行编码写帧;
+ * 2)如果没有帧可读,eof或者读帧失败会直接返回;否则会进行eagain的判断:
+ *      2.1)会选择输入文件中读帧失败次数最多的输入流,作为best_ist进行传出.
+ * @param gragh 滤波图
+ * @param best_ist eagain时,失败次数最多的输入流.
+ * @return 成功=0,注意best_ist=NULL时也会返回0,认为转码结束; 失败返回负数或者程序退出.
+*/
 static int transcode_from_filter(FilterGraph *graph, InputStream **best_ist)
 {
     int i, ret;
@@ -5352,13 +5409,14 @@ static int transcode_from_filter(FilterGraph *graph, InputStream **best_ist)
      * AVERROR_EOF：文件结尾；
      * AVERROR(EAGAIN)：如果之前的过滤器当前不能输出一帧，也不能保证EOF已经到达。
     */
-    /*1.获取graph有多少frame 可以从buffersink读取*/
+    /* 1.获取graph有多少frame 可以从buffersink读取. */
     ret = avfilter_graph_request_oldest(graph->graph);
     if (ret >= 0)
         return reap_filters(0);
 
     if (ret == AVERROR_EOF) {
         ret = reap_filters(1);
+        //为每个输出流标记编码结束
         for (i = 0; i < graph->nb_outputs; i++)
             close_output_stream(graph->outputs[i]->ost);
         return ret;
@@ -5366,12 +5424,18 @@ static int transcode_from_filter(FilterGraph *graph, InputStream **best_ist)
     if (ret != AVERROR(EAGAIN))
         return ret;
 
+    //处理EAGAIN的情况
+    /* 2. 判断输入文件是否处理完成. */
     for (i = 0; i < graph->nb_inputs; i++) {
         ifilter = graph->inputs[i];
+        //2.1 输入文件遇到eagain或者eof(上面的是输出流的EAGAIN,eof处理),执行continue
         ist = ifilter->ist;
         if (input_files[ist->file_index]->eagain ||
             input_files[ist->file_index]->eof_reached)
             continue;
+        /*av_buffersrc_get_nb_failed_requests(): 获取失败请求的数量。当调用request_frame方法而缓冲区中没有帧时，
+         * 请求失败。当添加一个帧时，该数字被重置*/
+        //2.2 记录遇到失败次数最多的输入流.
         nb_requests = av_buffersrc_get_nb_failed_requests(ifilter->filter);
         if (nb_requests > nb_requests_max) {
             nb_requests_max = nb_requests;
@@ -5379,10 +5443,12 @@ static int transcode_from_filter(FilterGraph *graph, InputStream **best_ist)
         }
     }
 
+    // 3. 找不到best_ist,说明输入文件遇到eagain或者eof,或者没有失败次数.那么会认为输入文件处理完成,标记对应的输出流为不可用?
     if (!*best_ist)
         for (i = 0; i < graph->nb_outputs; i++)
             graph->outputs[i]->ost->unavailable = 1;
 
+    // 4. 找不到best_ist(即*best_ist=NULL),也会返回0.
     return 0;
 }
 
@@ -5444,7 +5510,7 @@ static int transcode_step(void)
         }
         if ((ret = transcode_from_filter(ost->filter->graph, &ist)) < 0)
             return ret;
-        if (!ist)
+        if (!ist)//这里看到,transcode_from_filter找不到best_ist且成功,会认为转码结束
             return 0;
     } else if (ost->filter) {
         int i;

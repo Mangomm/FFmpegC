@@ -95,7 +95,7 @@ float dts_delta_threshold   = 10;
 float dts_error_threshold   = 3600*30;//帧能被解码的最大阈值大小？
 
 int audio_volume      = 256;
-int audio_sync_method = 0;
+int audio_sync_method = 0;              // 音频同步方法.默认0
 int video_sync_method = VSYNC_AUTO;
 float frame_drop_threshold = 0;
 int do_deinterlace    = 0;

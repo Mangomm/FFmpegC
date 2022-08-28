@@ -468,7 +468,7 @@ typedef struct OutputStream {
     struct InputStream *sync_ist; /* input stream to sync against */
     int64_t sync_opts;       /* output frame counter, could be changed to some true timestamp */ // FIXME look at frame_number
                              /* 输出帧计数器，可以更改为一些真实的时间戳. FIXME：查看frame_number */
-                             //同步输出pts？
+                             // 音频时:代表下一帧的pts(see do_audio_out()).
 
     /* pts of the first frame encoded for this stream, used for limiting
      * recording time */
@@ -531,7 +531,7 @@ typedef struct OutputStream {
     AVDictionary *swr_opts;
     AVDictionary *resample_opts;
     char *apad;
-    OSTFinished finished;               /* no more packets should be written for this stream(写帧失败，不应该再为该流写入任何信息包) */
+    OSTFinished finished;               /* no more packets should be written for this stream(输出流完成，则不应该再为该流写入任何信息包) */
     int unavailable;                    /* true if the steram is unavailable (possibly temporarily) */
     int stream_copy;                    // 是否不转码输出，例如-vcodec copy选项.0=转码 1=不转码.只要置为0，音视频都会进入转码的流程。see choose_encoder()
 
@@ -614,15 +614,15 @@ extern float dts_delta_threshold;
 extern float dts_error_threshold;
 
 extern int audio_volume;
-extern int audio_sync_method;
+extern int audio_sync_method;               // 音频同步方法.默认0
 extern int video_sync_method;
 extern float frame_drop_threshold;
 extern int do_benchmark;
-extern int do_benchmark_all;// -benchmark_all选项，默认0
+extern int do_benchmark_all;                // -benchmark_all选项，默认0
 extern int do_deinterlace;
 extern int do_hex_dump;
 extern int do_pkt_dump;
-extern int copy_ts;// -copyts选项，默认0
+extern int copy_ts;                         // -copyts选项，默认0
 extern int start_at_zero;
 extern int copy_tb;
 extern int debug_ts;
