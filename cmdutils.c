@@ -2436,10 +2436,26 @@ void *grow_array(void *array, int elem_size, int *size, int new_size)
     return array;
 }
 
+//获取旋转角度
 double get_rotation(AVStream *st)
 {
+    /*
+     * av_stream_get_side_data()：从信息流中获取边信息。
+     * 参1：流；参2：所需的边信息类型；参3：用于存储边信息大小的指针(可选)；
+     * 存在返回数据指针，，否则为NULL。
+     *
+     * AV_PKT_DATA_DISPLAYMATRIX：这个边数据包含一个描述仿射的3x3变换矩阵转换，
+     * 需要应用到解码的视频帧正确的显示。数据的详细描述请参见libavutil/display.h
+    */
     uint8_t* displaymatrix = av_stream_get_side_data(st,
                                                      AV_PKT_DATA_DISPLAYMATRIX, NULL);
+
+    /*
+     * av_display_rotation_get()：提取变换矩阵的旋转分量。
+     * 参1：转换矩阵。
+     * 返回转换旋转帧的角度(以度为单位)逆时针方向。角度将在[-180.0,180.0]范围内。如果矩阵是奇异的则返回NaN。
+     * @note：浮点数本质上是不精确的，所以调用者是建议在使用前将返回值舍入到最接近的整数。
+    */
     double theta = 0;
     if (displaymatrix)
         theta = -av_display_rotation_get((int32_t*) displaymatrix);

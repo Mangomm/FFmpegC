@@ -92,37 +92,37 @@ char *sdp_filename;
 
 float audio_drift_threshold = 0.1;
 float dts_delta_threshold   = 10;
-float dts_error_threshold   = 3600*30;//帧能被解码的最大阈值大小？
+float dts_error_threshold   = 3600*30;  //帧能被解码的最大阈值大小？
 
-int audio_volume      = 256;
+int audio_volume      = 256;            // -vol选项,默认256
 int audio_sync_method = 0;              // 音频同步方法.默认0
 int video_sync_method = VSYNC_AUTO;
 float frame_drop_threshold = 0;
-int do_deinterlace    = 0;
+int do_deinterlace    = 0;              // -deinterlace选项,默认0.
 int do_benchmark      = 0;
-int do_benchmark_all  = 0;  // -benchmark_all选项，默认0
+int do_benchmark_all  = 0;              // -benchmark_all选项，默认0
 int do_hex_dump       = 0;
 int do_pkt_dump       = 0;
 int copy_ts           = 0;
 int start_at_zero     = 0;
 int copy_tb           = -1;
-int debug_ts          = 0;  // 是否打印相关时间戳.-debug_ts选项
-int exit_on_error     = 0;
+int debug_ts          = 0;              // 是否打印相关时间戳.-debug_ts选项
+int exit_on_error     = 0;              // xerror选项
 int abort_on_flags    = 0;
 int print_stats       = -1;
 int qp_hist           = 0;
-int stdin_interaction = 1;  // 可认为是否是交互模式.除pipe、以及/dev/stdin值为0，其它例如普通文件、实时流都是1
+int stdin_interaction = 1;              // 可认为是否是交互模式.除pipe、以及/dev/stdin值为0，其它例如普通文件、实时流都是1
 int frame_bits_per_raw_sample = 0;
 float max_error_rate  = 2.0/3;
-int filter_nbthreads = 0;
+int filter_nbthreads = 0;               // -filter_threads选项,默认0,非复杂过滤器线程数.
 int filter_complex_nbthreads = 0;
 int vstats_version = 2;
 
 
 static int intra_only         = 0;
-static int file_overwrite     = 0;  // -y选项，重写输出文件，即覆盖该输出文件。0=不重写，1=重写，
-                                    //不过为0时且no_file_overwrite=0时会在终端询问用户是否重写
-static int no_file_overwrite  = 0;  // -n选项，不重写输出文件。0=不重写，1=重写
+static int file_overwrite     = 0;      // -y选项，重写输出文件，即覆盖该输出文件。0=不重写，1=重写，
+                                        // 不过为0时且no_file_overwrite=0时会在终端询问用户是否重写
+static int no_file_overwrite  = 0;      // -n选项，不重写输出文件。0=不重写，1=重写
 static int do_psnr            = 0;
 static int input_sync;
 static int input_stream_potentially_available = 0;// 标记，=1代表该输入文件可能是可用的

@@ -96,7 +96,7 @@ typedef struct OptionsContext {
     OptionGroup *g;
 
     /* input/output options */
-    int64_t start_time;
+    int64_t start_time;                         // -ss选项
     int64_t start_time_eof;
     int seek_timestamp;
     const char *format;                         // -f选项.注：多个-f选项时，只会取最后一个，例如ffmpeg xxx -f s16le -f flv xxx，那么format就是flv
@@ -118,7 +118,7 @@ typedef struct OptionsContext {
     int64_t input_ts_offset;                    //offset:136
     int loop;                                   //循环次数.例如无限次,-stream_loop -1
     int rate_emu;                               //offset:148 -re
-    int accurate_seek;
+    int accurate_seek;                          //-accurate_seek选项,是否开启精确查找,与-ss有关
     int thread_queue_size;
 
     SpecifierOpt *ts_scale;
@@ -131,7 +131,7 @@ typedef struct OptionsContext {
     int        nb_hwaccel_devices;
     SpecifierOpt *hwaccel_output_formats;
     int        nb_hwaccel_output_formats;
-    SpecifierOpt *autorotate;
+    SpecifierOpt *autorotate;                       // -autorotate选项
     int        nb_autorotate;
 
     /* output options */
@@ -232,8 +232,9 @@ typedef struct OptionsContext {
     int        nb_enc_time_bases;
 } OptionsContext;
 
+//自定义封装输入过滤器结构体
 typedef struct InputFilter {
-    AVFilterContext    *filter;
+    AVFilterContext    *filter;         // 指向buffer filter
     struct InputStream *ist;
     struct FilterGraph *graph;
     uint8_t            *name;
@@ -249,14 +250,14 @@ typedef struct InputFilter {
     AVFifoBuffer *frame_queue;          // 输入过滤器帧队列的大小；初始化时是8帧，av_fifo_alloc(8 * sizeof(AVFrame*))。
 
     // parameters configured for this input(为此输入配置的参数)
-    int format;
+    int format;                                 // 视频时:输入视频的像素格式
 
-    int width, height;
-    AVRational sample_aspect_ratio;
+    int width, height;                          // 输入视频的宽高
+    AVRational sample_aspect_ratio;             // 视频时:宽高比率,一般都是{0,1}
 
     int sample_rate;
-    int channels;
-    uint64_t channel_layout;
+    int channels;                               // 音频通道数
+    uint64_t channel_layout;                    // 通道布局
 
     AVBufferRef *hw_frames_ctx;
 
@@ -291,7 +292,7 @@ typedef struct OutputFilter {
 
 typedef struct FilterGraph {
     int            index;                       // 过滤器下标.see init_simple_filtergraph()
-    const char    *graph_desc;
+    const char    *graph_desc;                  // 图形描述.为空表示是简单过滤器,不为空则不是. see filtergraph_is_simple()
 
     AVFilterGraph *graph;                       // 系统过滤器
     int reconfiguration;
@@ -308,21 +309,23 @@ typedef struct InputStream {
     int discard;                /* true if stream data should be discarded */
     int user_set_discard;
     int decoding_needed;        /* non zero if the packets must be decoded in 'raw_fifo', see DECODING_FOR_* */
+                                // 非0表示输入流需要进行转码操作
 #define DECODING_FOR_OST    1
 #define DECODING_FOR_FILTER 2
 
     AVCodecContext *dec_ctx;    // 解码器上下文
     AVCodec *dec;               // choose_decoder找到的解码器
-    AVFrame *decoded_frame;
-    AVFrame *filter_frame; /* a ref of decoded_frame, to be sent to filters */
+    AVFrame *decoded_frame;     // 存放解码后的一帧.视频在decode_video()开辟,音频在decode_audio()
+    AVFrame *filter_frame; /* a ref of decoded_frame, to be sent to filters */ ///与decoded_frame类似
 
     int64_t       start;     /* time when read started *///单位微秒
     /* predicted dts of the next packet read for this stream or (when there are
      * several frames in a packet) of the next frame in current packet (in AV_TIME_BASE units) */
     int64_t       next_dts;
     int64_t       dts;       ///< dts of the last packet read for this stream (in AV_TIME_BASE units)
+                             ///(该流读取的最后一个包的dts)
 
-    int64_t       next_pts;  ///< synthetic pts for the next decode frame (in AV_TIME_BASE units)
+    int64_t       next_pts;  ///< synthetic pts for the next decode frame (in AV_TIME_BASE units)(下一个解码帧的合成PTS)
     int64_t       pts;       ///< current pts of the decoded frame  (in AV_TIME_BASE units)
     int           wrap_correction_done;
 
@@ -339,13 +342,14 @@ typedef struct InputStream {
     int64_t nb_samples; /* number of samples in the last decoded audio frame before looping.循环前最后解码音频帧中的采样数 */
 
     double ts_scale;
-    int saw_first_ts;
+    int saw_first_ts;                   // 是否是第一次进来的时间戳,用于处理输入流InputStream的dts/pts(see process_input_packet).
     AVDictionary *decoder_opts;         // 用户输入的解码器选项,是从o中复制的
     AVRational framerate;               /* framerate forced with -r */
-    int top_field_first;
+    int top_field_first;                // 是否优先显示顶部字段.
+                                        // 该值视频时,会在decode_video给AVFrame->top_field_first赋值(如果内容是交错的，则首先显示顶部字段)
     int guess_layout_max;
 
-    int autorotate;                     // 应该与旋转角度有关？
+    int autorotate;                     // -autorotate选项,与旋转角度有关
 
     int fix_sub_duration;
     struct { /* previous decoded subtitle and related variables */
@@ -366,7 +370,8 @@ typedef struct InputStream {
 
     /* decoded data from this stream goes into all those filters
      * currently video and audio only */
-    InputFilter **filters;                      // 对比输出流OutputStream可以看到，输入流可以有多个输入过滤器，因为输出流的filters是一级指针，而这里输入流是二级指针
+    InputFilter **filters;                      // 对比输出流OutputStream可以看到，输入流可以有多个输入过滤器,
+                                                // 因为输出流的filters是一级指针，而这里输入流是二级指针
     int        nb_filters;                      // **filters数组元素个数
 
     int reinit_filters;
@@ -381,9 +386,9 @@ typedef struct InputStream {
     void  *hwaccel_ctx;
     void (*hwaccel_uninit)(AVCodecContext *s);
     int  (*hwaccel_get_buffer)(AVCodecContext *s, AVFrame *frame, int flags);
-    int  (*hwaccel_retrieve_data)(AVCodecContext *s, AVFrame *frame);
+    int  (*hwaccel_retrieve_data)(AVCodecContext *s, AVFrame *frame);//硬件检索数据回调
     enum AVPixelFormat hwaccel_pix_fmt;
-    enum AVPixelFormat hwaccel_retrieved_pix_fmt;
+    enum AVPixelFormat hwaccel_retrieved_pix_fmt;//硬件检索像素格式
     AVBufferRef *hw_frames_ctx;
 
     /* stats */
@@ -391,12 +396,12 @@ typedef struct InputStream {
     uint64_t data_size;
     /* number of packets successfully read for this stream */
     uint64_t nb_packets;
-    // number of frames/samples retrieved from the decoder
-    uint64_t frames_decoded;
+    // number of frames/samples retrieved from the decoder(从解码器检索到的帧/样本数)
+    uint64_t frames_decoded;        // 解码器已经解码的帧数
     uint64_t samples_decoded;
 
-    int64_t *dts_buffer;
-    int nb_dts_buffer;
+    int64_t *dts_buffer;            // eof时,统计有几个dts被保存到该数组.see decode_video()
+    int nb_dts_buffer;              // dts_buffer的大小
 
     int got_output;
 } InputStream;
@@ -406,6 +411,8 @@ typedef struct InputFile {
     AVFormatContext *ctx; // 输入文件的ctx
     int eof_reached;      /* true if eof reached */
     int eagain;           /* true if last read attempt returned EAGAIN(如果上次读取尝试返回EAGAIN则为真) */
+                          //=1表示上一次读pkt时,返回了eagain
+
     int ist_index;        /* index of first stream in input_streams *///输入文件中第一个流的下标,一般为0
     int loop;             /* set number of times input stream should be looped *///循环次数.例如无限次,-stream_loop -1
     int64_t duration;     /* actual duration of the longest stream in a file
@@ -425,9 +432,13 @@ typedef struct InputFile {
     int accurate_seek;
 
 #if HAVE_THREADS
-    AVThreadMessageQueue *in_thread_queue;      // 该输入文件的线程消息队列
+    AVThreadMessageQueue *in_thread_queue;      // 该输入文件的线程消息队列.
+                                                // 多个输入文件时,会开启多个线程,每个线程通过av_read_frame读到的pkt会存放到该队列
+
     pthread_t thread;           /* thread reading from this file */
     int non_blocking;           /* reading packets from the thread should not block(从线程读取数据包不应该被阻塞) */
+                                // 存在多个输入文件即多线程读取时,av_read_frame是否阻塞,0=阻塞,1=非阻塞
+
     int joined;                 /* the thread has been joined */
     int thread_queue_size;      /* maximum number of queued packets */
 #endif
@@ -527,9 +538,9 @@ typedef struct OutputStream {
     char *filters_script;  ///< filtergraph script associated to the -filter_script option//与-filter_script选项相关联的Filtergraph脚本
 
     AVDictionary *encoder_opts;         // 保存着用户指定输出的编码器选项
-    AVDictionary *sws_dict;
-    AVDictionary *swr_opts;
-    AVDictionary *resample_opts;
+    AVDictionary *sws_dict;             // 视频转码参数选项，一般用于avfilter滤镜相关.(最终被应用到AVFilterGraph的scale_sws_opts成员)
+    AVDictionary *swr_opts;             // 音频相关配置选项.(最终会使用av_opt_set应用到AVFilterGraph的aresample_swr_opts成员)
+    AVDictionary *resample_opts;        // 重采样选项.
     char *apad;
     OSTFinished finished;               /* no more packets should be written for this stream(输出流完成，则不应该再为该流写入任何信息包) */
     int unavailable;                    /* true if the steram is unavailable (possibly temporarily) */
@@ -540,7 +551,7 @@ typedef struct OutputStream {
     // parameters are set in the AVStream.
     int initialized;                    // =1表示init_output_stream()调用完成.see init_output_stream()
 
-    int inputs_done;
+    int inputs_done;                    // =1表示输入流全部处理完成,see transcode_step()
 
     const char *attachment_filename;
     int copy_initial_nonkeyframes;      // 对应OptionsContext.copy_initial_nonkeyframes
@@ -609,12 +620,12 @@ extern int        nb_filtergraphs;          // filtergraphs数组的大小
 extern char *vstats_filename;
 extern char *sdp_filename;
 
-extern float audio_drift_threshold;
+extern float audio_drift_threshold;         // -adrift_threshold选项,默认0.1
 extern float dts_delta_threshold;
 extern float dts_error_threshold;
 
-extern int audio_volume;
-extern int audio_sync_method;               // 音频同步方法.默认0
+extern int audio_volume;                    // -vol选项,默认256
+extern int audio_sync_method;               // -async选项,音频同步方法.默认0
 extern int video_sync_method;
 extern float frame_drop_threshold;
 extern int do_benchmark;
@@ -623,7 +634,7 @@ extern int do_deinterlace;
 extern int do_hex_dump;
 extern int do_pkt_dump;
 extern int copy_ts;                         // -copyts选项，默认0
-extern int start_at_zero;
+extern int start_at_zero;                   // -start_at_zero选项，默认0
 extern int copy_tb;
 extern int debug_ts;
 extern int exit_on_error;
@@ -636,7 +647,7 @@ extern AVIOContext *progress_avio;
 extern float max_error_rate;
 extern char *videotoolbox_pixfmt;
 
-extern int filter_nbthreads;
+extern int filter_nbthreads;                // -filter_threads选项,默认0,非复杂过滤器线程数.
 extern int filter_complex_nbthreads;
 extern int vstats_version;
 
@@ -648,7 +659,7 @@ extern AVBufferRef *hw_device_ctx;
 #if CONFIG_QSV
 extern char *qsv_device;
 #endif
-extern HWDevice *filter_hw_device;
+extern HWDevice *filter_hw_device;          // -filter_hw_device选项
 
 
 void term_init(void);
