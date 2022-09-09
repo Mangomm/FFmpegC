@@ -115,7 +115,7 @@ int stdin_interaction = 1;              // 可认为是否是交互模式.除pip
 int frame_bits_per_raw_sample = 0;
 float max_error_rate  = 2.0/3;
 int filter_nbthreads = 0;               // -filter_threads选项,默认0,非复杂过滤器线程数.
-int filter_complex_nbthreads = 0;
+int filter_complex_nbthreads = 0;       // -filter_complex_threads选项,默认0,复杂过滤器线程数.
 int vstats_version = 2;
 
 

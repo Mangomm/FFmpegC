@@ -39,12 +39,17 @@
 #include "libavutil/imgutils.h"
 #include "libavutil/samplefmt.h"
 
+/**
+ * @brief 根据codec_id获取相关像素格式.  比较简单,了解一下即可.
+*/
 static const enum AVPixelFormat *get_compliance_unofficial_pix_fmts(enum AVCodecID codec_id, const enum AVPixelFormat default_formats[])
 {
+    //mpeg相关像素格式,主要是yuv相关的包格式
     static const enum AVPixelFormat mjpeg_formats[] =
         { AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ444P,
           AV_PIX_FMT_YUV420P,  AV_PIX_FMT_YUV422P,  AV_PIX_FMT_YUV444P,
           AV_PIX_FMT_NONE };
+    //jpeg相关像素格式,类似mpeg,比mpeg的种类多一点
     static const enum AVPixelFormat ljpeg_formats[] =
         { AV_PIX_FMT_BGR24   , AV_PIX_FMT_BGRA    , AV_PIX_FMT_BGR0,
           AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_YUVJ444P, AV_PIX_FMT_YUVJ422P,
@@ -60,23 +65,52 @@ static const enum AVPixelFormat *get_compliance_unofficial_pix_fmts(enum AVCodec
     }
 }
 
+/**
+ * @brief 该函数选择像素格式思路很简单:
+ * 1. 编解码器的像素数组存在的情况：判断target在数组中，则返回target;否则会自动选择,返回对应的best像素格式.
+ * 2. 编解码器的像素数组存在的情况：直接返回target.
+ *
+ * @param st 流
+ * @param enc_ctx 编解码器上下文
+ * @param codec 编解码器
+ * @param target 想要的像素格式
+ * @return AVPixelFormat
+*/
 enum AVPixelFormat choose_pixel_fmt(AVStream *st, AVCodecContext *enc_ctx, AVCodec *codec, enum AVPixelFormat target)
 {
+    // 1. 编解码器的像素格式数组存在,往下.
     if (codec && codec->pix_fmts) {
-        const enum AVPixelFormat *p = codec->pix_fmts;
-        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(target);
+        const enum AVPixelFormat *p = codec->pix_fmts;// 编解码器的默认像素格式数组.
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(target);//通过目标像素格式获取其描述.
         //FIXME: This should check for AV_PIX_FMT_FLAG_ALPHA after PAL8 pixel format without alpha is implemented
-        int has_alpha = desc ? desc->nb_components % 2 == 0 : 0;
+        int has_alpha = desc ? desc->nb_components % 2 == 0 : 0;// desc存在: nb_components为偶数,has_alpha=1,为奇数has_alpha=0;
+                                                                // desc不存在: has_alpha=0;
         enum AVPixelFormat best= AV_PIX_FMT_NONE;
 
+        // 允许合规的非官方的标准,那么会根据enc_ctx->codec_id改变p数组的值,也有可能不改变.
         if (enc_ctx->strict_std_compliance <= FF_COMPLIANCE_UNOFFICIAL) {
             p = get_compliance_unofficial_pix_fmts(enc_ctx->codec_id, p);
         }
+
+        // 遍历target是否存在在数组p,存在则退出,不存在会遍历到数组末尾退出
         for (; *p != AV_PIX_FMT_NONE; p++) {
+            /* avcodec_find_best_pix_fmt_of_2():内部单纯调用av_find_best_pix_fmt_of_2().
+             * av_find_best_pix_fmt_of_2():
+             * 计算当从一种特定像素格式转换到另一种格式时将发生何种损失。
+             * 当从一种像素格式转换到另一种像素格式时，可能会发生信息丢失。
+             * 例如，从RGB24转换为GRAY时，会丢失颜色信息。类似地，在从某些格式转换到其他格式时也会发生其他损失。
+             * 这些损失包括色度的损失，也包括分辨率的损失，颜色深度的损失，由于颜色空间转换的损失，阿尔法位的损失或由于颜色量化的损失.
+             * av_get_fix_fmt_loss()告诉您从一种像素格式转换到另一种像素格式时会发生的各种类型的丢失.
+             * 参1 目标像素格式1
+             * 参2 目标像素格式2
+             * 参3 源像素格式
+             * 参4 是否使用源像素格式alpha通道
+             * 返回值: 返回标志的组合，通知您将发生何种损失(对于无效的dst_pix_fmt表示是最大损失). */
             best= avcodec_find_best_pix_fmt_of_2(best, *p, target, has_alpha, NULL);
             if (*p == target)
                 break;
         }
+        //这里看到,只有像素格式数组p不支持target,ffmpeg才会返回自动选择的best,支持的话就一定会返回target.
         if (*p == AV_PIX_FMT_NONE) {
             if (target != AV_PIX_FMT_NONE)
                 av_log(NULL, AV_LOG_WARNING,
@@ -87,6 +121,7 @@ enum AVPixelFormat choose_pixel_fmt(AVStream *st, AVCodecContext *enc_ctx, AVCod
             return best;
         }
     }
+
     return target;
 }
 
@@ -112,30 +147,47 @@ void choose_sample_fmt(AVStream *st, AVCodec *codec)
     }
 }
 
+/**
+ * @brief 获取输出像素格式的名字.
+ * @param ofilter OutputFilter
+ * @return 成功-找到返回对应的像素格式,找不到返回NULL; 失败-程序退出.
+*/
 static char *choose_pix_fmts(OutputFilter *ofilter)
 {
     OutputStream *ost = ofilter->ost;
+
+    // 1. -strict选项.
+    // 可以通过设置到ost->encoder_opts中来设置.
     AVDictionaryEntry *strict_dict = av_dict_get(ost->encoder_opts, "strict", NULL, 0);
     if (strict_dict)
         // used by choose_pixel_fmt() and below
+        // libavcodec/options_table.h的avcodec_options数组.
+        // avcodec_options数组内部有两个"strict"选项,其中一个会设置到变量AVCodecContext.strict_std_compliance.
+        // strict大概意思是严格遵守相关标准.
         av_opt_set(ost->enc_ctx, "strict", strict_dict->value, 0);
 
+    // 2. 若keep_pix_fmt不为0,直接从编解码器上下文返回像素格式.
      if (ost->keep_pix_fmt) {
+        /* avfilter_graph_set_auto_convert(): 启用或禁用图形内部的自动格式转换(源码很简单)。
+         * 请注意，格式转换仍然可以在显式插入的 scale和aresample filters 中发生。
+         * @param标记任何AVFILTER_AUTO_CONVERT_*常量. */
         avfilter_graph_set_auto_convert(ofilter->graph->graph,
                                             AVFILTER_AUTO_CONVERT_NONE);
         if (ost->enc_ctx->pix_fmt == AV_PIX_FMT_NONE)
             return NULL;
         return av_strdup(av_get_pix_fmt_name(ost->enc_ctx->pix_fmt));
     }
-    if (ost->enc_ctx->pix_fmt != AV_PIX_FMT_NONE) {
+
+    // 3. 返回像素名字.
+    if (ost->enc_ctx->pix_fmt != AV_PIX_FMT_NONE) {// 3.1优先从编解码器上下文中返回
         return av_strdup(av_get_pix_fmt_name(choose_pixel_fmt(ost->st, ost->enc_ctx, ost->enc, ost->enc_ctx->pix_fmt)));
-    } else if (ost->enc && ost->enc->pix_fmts) {
+    } else if (ost->enc && ost->enc->pix_fmts) {// 3.2否则从编解码器中返回
         const enum AVPixelFormat *p;
         AVIOContext *s = NULL;
         uint8_t *ret;
         int len;
 
-        if (avio_open_dyn_buf(&s) < 0)
+        if (avio_open_dyn_buf(&s) < 0)//打开一个只写的内存流
             exit_program(1);
 
         p = ost->enc->pix_fmts;
@@ -143,6 +195,7 @@ static char *choose_pix_fmts(OutputFilter *ofilter)
             p = get_compliance_unofficial_pix_fmts(ost->enc_ctx->codec_id, p);
         }
 
+        //把像素数组里的元素 换成 像素名字拼接,通过ret指针返回.
         for (; *p != AV_PIX_FMT_NONE; p++) {
             const char *name = av_get_pix_fmt_name(*p);
             avio_printf(s, "%s|", name);
@@ -151,11 +204,25 @@ static char *choose_pix_fmts(OutputFilter *ofilter)
         ret[len - 1] = 0;
         return ret;
     } else
-        return NULL;
+        return NULL;// 3.3否则返回NULL
 }
 
 /* Define a function for building a string containing a list of
- * allowed formats. */
+ * allowed formats.(定义一个函数，用于构建包含允许格式列表的字符串) */
+//exit_program类似choose_pix_fmts()内的操作
+/**
+ * @brief 用于定义一些函数,返回该格式对应的名字 或者 返回该格式数组对应的名字(拼接得到).过程:
+ * 1. 若ofilter.var成员存在,则直接返回该成员的name;
+ * 2. 否则若ofilter.supported_list数组存在,或先通过类型获取name,然后拼接到s中,最终拼接的字符串通过ret返回.
+ * 3. 若都不存在,返回NULL.
+ *
+ * @param suffix choose_后的后缀,用于组成完整的函数名.
+ * @param type var变量的类型.例如int
+ * @param var ofilter内部的变量名
+ * @param supported_list ofilter内部的变量名,一般是数组
+ * @param none supported_list数组的结束符
+ * @param get_name 定义一些调用语句,用来获取名字
+ */
 #define DEF_CHOOSE_FORMAT(suffix, type, var, supported_list, none, get_name)   \
 static char *choose_ ## suffix (OutputFilter *ofilter)                         \
 {                                                                              \
@@ -169,7 +236,7 @@ static char *choose_ ## suffix (OutputFilter *ofilter)                         \
         int len;                                                               \
                                                                                \
         if (avio_open_dyn_buf(&s) < 0)                                         \
-            exit_program(1);                                                           \
+            exit_program(1);                                                   \
                                                                                \
         for (p = ofilter->supported_list; *p != none; p++) {                   \
             get_name(*p);                                                      \
@@ -184,7 +251,7 @@ static char *choose_ ## suffix (OutputFilter *ofilter)                         \
 
 //DEF_CHOOSE_FORMAT(pix_fmts, enum AVPixelFormat, format, formats, AV_PIX_FMT_NONE,
 //                  GET_PIX_FMT_NAME)
-
+//使用宏DEF_CHOOSE_FORMAT定义3个函数.
 DEF_CHOOSE_FORMAT(sample_fmts, enum AVSampleFormat, format, formats,
                   AV_SAMPLE_FMT_NONE, GET_SAMPLE_FMT_NAME)
 
@@ -510,6 +577,17 @@ static int insert_filter(AVFilterContext **last_filter, int *pad_idx,
     return 0;
 }
 
+/**
+ * @brief 配置输出视频过滤器.该函数执行完,filter链表大概是这样的:
+ * out->filter_ctx->scale->format->fps->trim->buffersink。
+ * 与配置输入视频过滤器的顺序可认为是相反的.
+ *
+ * @param fg fg
+ * @param ofilter OutputFilter
+ * @param out AVFilterInOut. 例如是avfilter_graph_parse2解析过滤器字符串时的传出参数outputs.
+ *
+ * @return 成功-0 失败-负数,或程序退出(choose_pix_fmts).
+*/
 static int configure_output_video_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOut *out)
 {
     char *pix_fmts;
@@ -520,6 +598,7 @@ static int configure_output_video_filter(FilterGraph *fg, OutputFilter *ofilter,
     int ret;
     char name[255];
 
+    // 1. 创建一个滤波器实例AVFilterContext，并添加到AVFilterGraph中.(buffersink)
     snprintf(name, sizeof(name), "out_%d_%d", ost->file_index, ost->index);
     ret = avfilter_graph_create_filter(&ofilter->filter,
                                        avfilter_get_by_name("buffersink"),
@@ -528,19 +607,21 @@ static int configure_output_video_filter(FilterGraph *fg, OutputFilter *ofilter,
     if (ret < 0)
         return ret;
 
+    // 2. 若输出存在分辨率,添加scale滤镜
     if (ofilter->width || ofilter->height) {
         char args[255];
         AVFilterContext *filter;
         AVDictionaryEntry *e = NULL;
 
         snprintf(args, sizeof(args), "%d:%d",
-                 ofilter->width, ofilter->height);
+                 ofilter->width, ofilter->height);//scale的分辨率参数
 
         while ((e = av_dict_get(ost->sws_dict, "", e,
-                                AV_DICT_IGNORE_SUFFIX))) {
+                                AV_DICT_IGNORE_SUFFIX))) {//用户对滤镜scale指定的参数.
             av_strlcatf(args, sizeof(args), ":%s=%s", e->key, e->value);
         }
 
+        //snprintf会自动清理,所以上次的name不会影响到本次的name.
         snprintf(name, sizeof(name), "scaler_out_%d_%d",
                  ost->file_index, ost->index);
         if ((ret = avfilter_graph_create_filter(&filter, avfilter_get_by_name("scale"),
@@ -553,10 +634,11 @@ static int configure_output_video_filter(FilterGraph *fg, OutputFilter *ofilter,
         pad_idx = 0;
     }
 
+    // 3. 若输出流(具体是输出流的编码器上下文或者编码器)存在像素格式名字,则添加format滤镜
     if ((pix_fmts = choose_pix_fmts(ofilter))) {
         AVFilterContext *filter;
         snprintf(name, sizeof(name), "format_out_%d_%d",
-                 ost->file_index, ost->index);
+                 ost->file_index, ost->index);//该name并没用到,ffmpeg直接用"format"了
         ret = avfilter_graph_create_filter(&filter,
                                            avfilter_get_by_name("format"),
                                            "format", pix_fmts, NULL, fg->graph);
@@ -570,6 +652,8 @@ static int configure_output_video_filter(FilterGraph *fg, OutputFilter *ofilter,
         pad_idx     = 0;
     }
 
+    // 4. 若输出流的帧率存在,则添加fps滤镜.
+    // 因为这里if条件固定是0,所以一定不会进来.
     if (ost->frame_rate.num && 0) {
         AVFilterContext *fps;
         char args[255];
@@ -590,20 +674,34 @@ static int configure_output_video_filter(FilterGraph *fg, OutputFilter *ofilter,
         pad_idx = 0;
     }
 
+    // 5. 指定了录像相关的选项,会插入trim filter.
     snprintf(name, sizeof(name), "trim_out_%d_%d",
              ost->file_index, ost->index);
     ret = insert_trim(of->start_time, of->recording_time,
-                      &last_filter, &pad_idx, name);
+                      &last_filter, &pad_idx, name);//输入输出文件的start_time,recording_time是否一致,有兴趣的可以自行研究
     if (ret < 0)
         return ret;
 
-
+    // 6. 连接.执行到这里,最终指向输出的buffersink.
     if ((ret = avfilter_link(last_filter, pad_idx, ofilter->filter, 0)) < 0)
         return ret;
 
     return 0;
 }
 
+/**
+ * @brief 配置输出音频过滤器.该函数执行完,filter链表大概是这样的:
+ * out->filter_ctx->pan->aformat->volume->apad->trim->abuffersink。
+ *
+ * @param fg fg
+ * @param ofilter OutputFilter
+ * @param out AVFilterInOut. 例如是avfilter_graph_parse2解析过滤器字符串时的传出参数outputs.
+ *
+ * @return 成功-0 失败-负数,或程序退出(例如choose_sample_fmts里面的宏).
+ *
+ * @note 这个函数和configure_output_video_filter在debug时,无法加载相关变量值,这貌似是与qt+gdb的问题.
+ *          不过我们可以通过打印来进行调试.
+*/
 static int configure_output_audio_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOut *out)
 {
     OutputStream *ost = ofilter->ost;
@@ -615,12 +713,15 @@ static int configure_output_audio_filter(FilterGraph *fg, OutputFilter *ofilter,
     char name[255];
     int ret;
 
+    // 1. 创建一个滤波器实例AVFilterContext，并添加到AVFilterGraph中.(abuffersink)
     snprintf(name, sizeof(name), "out_%d_%d", ost->file_index, ost->index);
     ret = avfilter_graph_create_filter(&ofilter->filter,
                                        avfilter_get_by_name("abuffersink"),
                                        name, NULL, NULL, fg->graph);
     if (ret < 0)
         return ret;
+
+    //设置abuffersink接受所有通道数(accept all channel counts),最终设置到BufferSinkContext.all_channel_counts变量
     if ((ret = av_opt_set_int(ofilter->filter, "all_channel_counts", 1, AV_OPT_SEARCH_CHILDREN)) < 0)
         return ret;
 
@@ -643,23 +744,35 @@ static int configure_output_audio_filter(FilterGraph *fg, OutputFilter *ofilter,
     last_filter = filt_ctx;                                                 \
     pad_idx = 0;                                                            \
 } while (0)
+
+    // 2. 若音频通道map数组有内容,添加pan滤镜.
+    // pan滤镜定义在libavfilter/af_pan.c
+    //printf("+++++++++++tyycode ost->audio_channels_mapped: %d\n", ost->audio_channels_mapped);//没加对应选项为0.
     if (ost->audio_channels_mapped) {
         int i;
         AVBPrint pan_buf;
+        //开辟一个最大缓存为8192,初始化大小为256字节的buffer.参2代表初始化字节大小;参3代表该缓存最大大小.
         av_bprint_init(&pan_buf, 256, 8192);
         av_bprintf(&pan_buf, "0x%"PRIx64,
-                   av_get_default_channel_layout(ost->audio_channels_mapped));
+                   av_get_default_channel_layout(ost->audio_channels_mapped));//添加字符串描述到pan_buf(一般字符串都是放在pan_buf.str)
+        //将map数组里的内容追加到pan_buf
         for (i = 0; i < ost->audio_channels_mapped; i++)
             if (ost->audio_channels_map[i] != -1)
                 av_bprintf(&pan_buf, "|c%d=c%d", i, ost->audio_channels_map[i]);
 
         AUTO_INSERT_FILTER("-map_channel", "pan", pan_buf.str);
-        av_bprint_finalize(&pan_buf, NULL);
+        /* av_bprint_finalize():完成打印缓冲区.
+         * 打印缓冲区之后将不再被使用，但是len和size字段仍然有效。
+         * 参2: 如果不是NULL，用于返回缓冲区内容的永久副本,
+         * 如果内存分配失败，则返回NULL;如果为NULL，则丢弃并释放缓冲区*/
+        av_bprint_finalize(&pan_buf, NULL);//参2传NULL代表释放pan_buf内开辟过的内存.
     }
 
     if (codec->channels && !codec->channel_layout)
         codec->channel_layout = av_get_default_channel_layout(codec->channels);
 
+    // 3. 若从输出过滤器OutputFilter获取到采样格式、采样率、通道布局其中一个,那么添加aformat滤镜.
+    // (音频三元组一般指采样率，采样大小和通道数)
     sample_fmts     = choose_sample_fmts(ofilter);
     sample_rates    = choose_sample_rates(ofilter);
     channel_layouts = choose_channel_layouts(ofilter);
@@ -677,6 +790,10 @@ static int configure_output_audio_filter(FilterGraph *fg, OutputFilter *ofilter,
         if (channel_layouts)
             av_strlcatf(args, sizeof(args), "channel_layouts=%s:",
                             channel_layouts);
+        //上面av_strlcatf追加完字符串后,args末尾的":"冒号不用去掉吗?留个疑问.
+        //例如打印结果: args="sample_fmts=s16p:sample_rates=48000:channel_layouts=0x3:"
+        //看到aformat创建时args末尾可以保留冒号":".
+        //printf("+++++++++++tyycode args: %s\n", args);
 
         av_freep(&sample_fmts);
         av_freep(&sample_rates);
@@ -698,6 +815,9 @@ static int configure_output_audio_filter(FilterGraph *fg, OutputFilter *ofilter,
         pad_idx = 0;
     }
 
+    // 4. 若指定-vol选项改变音量,添加volume滤镜.
+    // 因为if条件与上0,所以肯定不会进来,类似视频的fps滤镜处理.
+    // 实际上音量滤镜这步的处理在configure_input_audio_filter()已经处理.
     if (audio_volume != 256 && 0) {
         char args[256];
 
@@ -705,20 +825,24 @@ static int configure_output_audio_filter(FilterGraph *fg, OutputFilter *ofilter,
         AUTO_INSERT_FILTER("-vol", "volume", args);
     }
 
+    // 5. 若apad和shortest都存在,且输出流中存在视频流, 那么添加apad滤镜.
     if (ost->apad && of->shortest) {
         char args[256];
         int i;
 
+        // 判断是否存在视频流
         for (i=0; i<of->ctx->nb_streams; i++)
             if (of->ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
                 break;
 
+        // 存在视频流,那么i一定小于of->ctx->nb_streams,添加apad滤镜
         if (i<of->ctx->nb_streams) {
             snprintf(args, sizeof(args), "%s", ost->apad);
             AUTO_INSERT_FILTER("-apad", "apad", args);
         }
     }
 
+    // 6. 指定了录像相关的选项,会插入trim filter.
     snprintf(name, sizeof(name), "trim for output stream %d:%d",
              ost->file_index, ost->index);
     ret = insert_trim(of->start_time, of->recording_time,
@@ -726,19 +850,31 @@ static int configure_output_audio_filter(FilterGraph *fg, OutputFilter *ofilter,
     if (ret < 0)
         return ret;
 
+    // 7. 连接.执行到这里,最终指向输出的abuffersink.
     if ((ret = avfilter_link(last_filter, pad_idx, ofilter->filter, 0)) < 0)
         return ret;
 
     return 0;
 }
 
+/**
+ * @brief 配置输出过滤器.
+ *
+ * @param fg fg
+ * @param ofilter OutputFilter
+ * @param out AVFilterInOut. 例如是avfilter_graph_parse2解析过滤器字符串时的传出参数outputs.
+ *
+ * @return 成功-0 失败-负数,或者程序退出.
+*/
 int configure_output_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOut *out)
 {
+    // 1. 要配置的输出过滤器对应的输出流为空,报错.
     if (!ofilter->ost) {
         av_log(NULL, AV_LOG_FATAL, "Filter %s has an unconnected output\n", ofilter->name);
         exit_program(1);
     }
 
+    // 2. 根据不同的媒体类型配置输出filter.
     switch (avfilter_pad_get_type(out->filter_ctx->output_pads, out->pad_idx)) {
     case AVMEDIA_TYPE_VIDEO: return configure_output_video_filter(fg, ofilter, out);
     case AVMEDIA_TYPE_AUDIO: return configure_output_audio_filter(fg, ofilter, out);
@@ -1156,6 +1292,14 @@ static int configure_input_audio_filter(FilterGraph *fg, InputFilter *ifilter,
     return 0;
 }
 
+/**
+ * @brief 配置输入过滤器.
+ * @param fg fg
+ * @param ifilter InputFilter
+ * @param in AVFilterInOut. 例如是avfilter_graph_parse2解析过滤器字符串时的传出参数inputs.
+ *
+ * @return 成功-0 失败-负数
+ */
 static int configure_input_filter(FilterGraph *fg, InputFilter *ifilter,
                                   AVFilterInOut *in)
 {
@@ -1175,29 +1319,44 @@ static int configure_input_filter(FilterGraph *fg, InputFilter *ifilter,
     }
 }
 
+/**
+ * @brief 回收fg,实际上就是单纯回收了AVFilterGraph.
+ * @param fg
+ */
 static void cleanup_filtergraph(FilterGraph *fg)
 {
     int i;
+    //思考一下fg->outputs[i]->filter是在哪里开辟的.
+    //答:在配置InputFilter,OutputFilter时使用avfilter_graph_create_filter创建的.
+    //可以看到,avfilter_graph_create_filter创建的AVFilterContext不需要我们回收,ffmpeg只是将其直接置空
     for (i = 0; i < fg->nb_outputs; i++)
-        fg->outputs[i]->filter = (AVFilterContext *)NULL;//思考一下fg->outputs[i]->filter是在哪里开辟的.
+        fg->outputs[i]->filter = (AVFilterContext *)NULL;
     for (i = 0; i < fg->nb_inputs; i++)
         fg->inputs[i]->filter = (AVFilterContext *)NULL;
     avfilter_graph_free(&fg->graph);
 }
 
+/**
+ * @brief 配置每个流的FilterGraph.以视频流为例,配置完后, 可能是这样的:
+ *      buffer->insert_filter函数的滤镜(transpose,hflip,vflip,rotate)->yadif->trim->(in->filter_ctx);(输入)
+ *      (out->filter_ctx)->scale->format->fps->trim->buffersink;(输出),
+ * 其中: in->filter_ctx = out->filter_ctx;
+ * @param fg fg
+ * @return 成功-0 失败-负数或者程序退出
+ */
 int configure_filtergraph(FilterGraph *fg)
 {
     AVFilterInOut *inputs, *outputs, *cur;
-    int ret, i, simple = filtergraph_is_simple(fg);//推流命令为simple=1
+    int ret, i, simple = filtergraph_is_simple(fg);//按例子的推流命令时,simple=1
     const char *graph_desc = simple ? fg->outputs[0]->ost->avfilter :
-                                      fg->graph_desc;
+                                      fg->graph_desc;//graph_desc一般是"null"或者"anull"
 
     // 1. 先清理上一次的FilterGraph,然后再开辟AVFilterGraph.
     cleanup_filtergraph(fg);
     if (!(fg->graph = avfilter_graph_alloc()))
         return AVERROR(ENOMEM);
 
-    // 2. 如果是简单过滤器,需要组成对应的字符串描述,否则是复杂则不需要,因为本身就是字符串描述.
+    // 2. 如果是简单过滤器,需要组成对应的字符串描述设置到对应的变量;复杂则不需要,因为本身就是字符串描述.
     // fg->graph_desc过滤器字符串描述为空表示简单过滤器,不为空表示复杂过滤器.
     if (simple) {
         OutputStream *ost = fg->outputs[0]->ost;
@@ -1214,22 +1373,29 @@ int configure_filtergraph(FilterGraph *fg)
         }
         if (strlen(args))
             args[strlen(args)-1] = 0;//末尾添加哨兵字符0,同时可以去掉末尾的":"
-
         // 2.2 应用该描述
         fg->graph->scale_sws_opts = av_strdup(args);
 
-        // 下面是类似的
+        // 每次将字符串的首个字符置为0, 相当于清空args数组, 下一次av_strlcatf就会在传进的数组的首字节开始写入.
+        /* 注,av_strlcatf每次会在实际写入的字节数的下一个字节补0,很重要,这个实际是vsnprintf函数的作用.
+         * 例如实际写入5字节,那么在第6字节会补0. 理解这一点,我们就知道为啥这里都使用args数组,而不会影响下一次拼接.
+         *
+         * 例如sws_dict处理完后,args="flags=bicubic", 经过args[0]=0后,args="\0lags=bicubic",
+         * 假设拼接时swr_opts有内容:"ch=2:", 那么在执行本次av_strlcatf:
+         * 1)如果av_strlcatf不在实际写入的字节数的下一个字节补0,猜想得到的应该是: args="ch=2:=bicubic",那么这样就一定会影响到下一个选项的设置(当然这种是不存在的).
+         * 2)而实际av_strlcatf是会在实际写入的字节数的下一个字节补0,真正得到的是: args="ch=2:\0bicubic",那么就一定不会影响到下一个选项的设置.
+         * . */
         args[0] = 0;
+        //av_dict_set(&ost->swr_opts, "ch", "2", 0);//tyy code
         while ((e = av_dict_get(ost->swr_opts, "", e,
                                 AV_DICT_IGNORE_SUFFIX))) {
             av_strlcatf(args, sizeof(args), "%s=%s:", e->key, e->value);
         }
         if (strlen(args))
             args[strlen(args)-1] = 0;
+        av_opt_set(fg->graph, "aresample_swr_opts", args, 0);//这里通过av_opt_set设置.
 
-        av_opt_set(fg->graph, "aresample_swr_opts", args, 0);
-
-        //resample_opts最终应用到哪?args会保存上面swr_opts/sws_dict这些字符串吗?留个疑问
+        //resample_opts最终应用到哪?这里看到这个字典并未被ffmpeg使用
         args[0] = '\0';
         while ((e = av_dict_get(fg->outputs[0]->ost->resample_opts, "", e,
                                 AV_DICT_IGNORE_SUFFIX))) {
@@ -1246,9 +1412,9 @@ int configure_filtergraph(FilterGraph *fg)
         fg->graph->nb_threads = filter_complex_nbthreads;//复杂过滤器的线程数,同样是设置到fg->graph->nb_threads
     }
     //这里我们知道,简单和复杂过滤器字符串描述的区别是:
-    //简单是用户输入key=val的形式,然后ffmpeg再将这些组成字符串描述; 而复杂则是用户直接传字符串描述.
+    //简单是用户输入key=val的形式,然后ffmpeg再将这些组成字符串描述保存; 而复杂则是用户直接传字符串描述.
 
-    // 3. 解析过滤器字符串
+    // 3. 解析过滤器字符串.
     // avfilter_graph_parse2的作用：1）解析字符串；2）并且将滤波图的集合放在inputs、outputs中。
     /* avfilter_graph_parse2(): 将字符串描述的图形添加到图形中。
      * 参1: 将解析图上下文链接到其中的过滤器图
@@ -1260,6 +1426,9 @@ int configure_filtergraph(FilterGraph *fg)
      * 注意: 这个函数返回在解析图之后未链接的输入和输出，然后调用者处理它们.
      * 注意: 这个函数不引用graph中已经存在的部分，输入参数在返回时将包含图中新解析部分的输入。类似地，outputs参数将包含新创建的filters的输出。
     */
+    // 复杂过滤器字符串一般都是调avfilter_graph_parse2函数直接解析,非常方便;
+    // 简单字符串一般都是依赖avfilter_graph_create_filter+avfilter_link来处理.
+    // ffmpeg这里都使用到.
     if ((ret = avfilter_graph_parse2(fg->graph, graph_desc, &inputs, &outputs)) < 0)
         goto fail;
 
@@ -1310,77 +1479,113 @@ int configure_filtergraph(FilterGraph *fg)
     // 6. 此时AVFilterContext的链表会被保存在inputs、outputs,那么就开始配置它们.
     // 我们看AVFilterInOut的定义以及avfilter_graph_parse2()源码,ffmpeg大概是这样处理的(笔者没详细看,不一定完全准确):
     // 每一个AVFilterInOut保存一个AVFilterContext, 链表由AVFilterInOut *next链接.
+    // 不过调用一次avfilter_graph_parse2,一般AVFilterInOut*链表只有一个元素,下一个元素是指向NULL的.
     // 6.1 配置输入过滤器
+    // 配置完后,InputFilter->filter保存着输入过滤器链表的头,即指向buffer,abuffer.
     for (cur = inputs, i = 0; cur; cur = cur->next, i++)
         if ((ret = configure_input_filter(fg, fg->inputs[i], cur)) < 0) {
             avfilter_inout_free(&inputs);
             avfilter_inout_free(&outputs);
             goto fail;
         }
+    //注意!!! avfilter_inout_free执行完后,内部的inputs->filter_ctx并不会被释放掉,所以不用担心配置完输入过滤器后,该过滤器被释放掉.
+    //这部分我已经测试过,测试很简单,释放前先保存inputs->filter_ctx,释放后看inputs->filter_ctx是否还有值,结果测试是有的.
+    //下面的输出过滤器同理.
     avfilter_inout_free(&inputs);
 
-    // 6.2 配置输出过滤器
+    // 6.2 配置输出过滤器.
+    // 配置完后,OutputFilter->filter保存着输出过滤器链表的尾,即指向buffersink,abuffersink.
     for (cur = outputs, i = 0; cur; cur = cur->next, i++)
         configure_output_filter(fg, fg->outputs[i], cur);
     avfilter_inout_free(&outputs);
 
+    /* 注意!!! 输入和输出过滤器是如何链接起来的呢？
+     答:我们观察inputs->filter_ctx与outputs->filter_ctx,这两者的指向是一样的,所以当我们处理完输入过滤器后,
+        inputs->filter_ctx是输入过滤器的尾部元素;而在处理输出过滤器时,outputs->filter_ctx是作为开始的,所以这就解释了
+        输入输出过滤器是通过inputs->filter_ctx=outputs->filter_ctx来链接的.
+        所以下面可以直接提交整个滤波图. */
+
+    // 7. 提交整个滤波图
     if ((ret = avfilter_graph_config(fg->graph, NULL)) < 0)
         goto fail;
 
     /* limit the lists of allowed formats to the ones selected, to
      * make sure they stay the same if the filtergraph is reconfigured later */
+    // (将允许的格式列表限制为所选格式，以确保在以后重新配置filtergraph时它们保持不变)
+    // 8. 把输出过滤器buffersink,abuffersink相关的参数保存下来.
     for (i = 0; i < fg->nb_outputs; i++) {
         OutputFilter *ofilter = fg->outputs[i];
         AVFilterContext *sink = ofilter->filter;
 
         ofilter->format = av_buffersink_get_format(sink);
 
-        ofilter->width  = av_buffersink_get_w(sink);
+        ofilter->width  = av_buffersink_get_w(sink);//注意宽高视频才会有值,音频是没有的
         ofilter->height = av_buffersink_get_h(sink);
 
-        ofilter->sample_rate    = av_buffersink_get_sample_rate(sink);
+        ofilter->sample_rate    = av_buffersink_get_sample_rate(sink);//注意采样率,通道布局音频才会有值,视频是没有的
         ofilter->channel_layout = av_buffersink_get_channel_layout(sink);
     }
 
-    fg->reconfiguration = 1;
+    fg->reconfiguration = 1;//标记配置了AVFilterGraph?
 
+    // 9. 检测 该输出过滤器 对应的 输出流的编码器 是否已经初始化,因为复杂的过滤器图会在前面初始化.
     for (i = 0; i < fg->nb_outputs; i++) {
         OutputStream *ost = fg->outputs[i]->ost;
         if (!ost->enc) {
             /* identical to the same check in ffmpeg.c, needed because
                complex filter graphs are initialized earlier */
+            // (与ffmpeg.c中的检查相同，这是必需的，因为复杂的过滤器图会在前面初始化)
             av_log(NULL, AV_LOG_ERROR, "Encoder (codec %s) not found for output stream #%d:%d\n",
                      avcodec_get_name(ost->st->codecpar->codec_id), ost->file_index, ost->index);
             ret = AVERROR(EINVAL);
             goto fail;
         }
+
+        // 若是音频 且 音频编码器不支持在每次调用中接收不同数量的样本，那么设置样本大小(参考init_output_stream的做法).
         if (ost->enc->type == AVMEDIA_TYPE_AUDIO &&
             !(ost->enc->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE))
             av_buffersink_set_frame_size(ost->filter->filter,
-                                         ost->enc_ctx->frame_size);
+                                         ost->enc_ctx->frame_size);//一般会进来
     }
 
+    /* 10. 遍历InputFilter数组中的每个元素, 若元素的fifo帧队列还有可读的字节数,
+     * 那么全部读出来, 扔到av_buffersrc_add_frame处理. */
     for (i = 0; i < fg->nb_inputs; i++) {
+        /*test1:测试sizeof(t1)的大小
+        //AVFrame *t1;
+        //printf("sizeof(t1): %d, sizeof(AVFrame): %d\n", sizeof(t1), sizeof(AVFrame));// 8 536 */
+        /*test2:测试拷贝地址.
+        int *a;
+        int *v1 = (int*)malloc(sizeof (int));
+        *v1 = 1000;
+        memcpy(&a, &v1, sizeof(a));
+        printf("a: %#X, &a: %#X, v1: %#X, &v1: %#X\n", a, &a, v1, &v1);*/
         while (av_fifo_size(fg->inputs[i]->frame_queue)) {
             AVFrame *tmp;
+            //注意,这里每次只会读8字节(64位机器时),因为sizeof(t1)=8
+            //为什么只读8字节呢?因为我们在av_fifo_generic_write时,就是写指针的地址的,这样我们就得到指向AVFrame*的数据.
+            //这种处理相当于C++的vertor<AVFrame*>,即队列存储的是指向数据的地址(画图理解即可).
             av_fifo_generic_read(fg->inputs[i]->frame_queue, &tmp, sizeof(tmp), NULL);
             ret = av_buffersrc_add_frame(fg->inputs[i]->filter, tmp);
-            av_frame_free(&tmp);
+            av_frame_free(&tmp);//这里会把tmp释放掉,也就说,av_buffersrc_add_frame内部会进行相关copy操作.
             if (ret < 0)
                 goto fail;
         }
     }
 
-    /* send the EOFs for the finished inputs */
+    // 11. 遍历InputFilter数组中的每个元素,若该InputFilter元素结束了,会往该InputFilter的buffer刷空帧.
+    // InputFilter数组一般只有一个元素.
+    /* send the EOFs for the finished inputs(发送EOF对于完成输入的) */
     for (i = 0; i < fg->nb_inputs; i++) {
         if (fg->inputs[i]->eof) {
-            ret = av_buffersrc_add_frame(fg->inputs[i]->filter, NULL);
+            ret = av_buffersrc_add_frame(fg->inputs[i]->filter, NULL);//刷空帧.
             if (ret < 0)
                 goto fail;
         }
     }
 
-    /* process queued up subtitle packets */
+    // 12. 字幕相关,暂不深入研究,推流没用到.
+    /* process queued up subtitle packets(处理排队的字幕数据包) */
     for (i = 0; i < fg->nb_inputs; i++) {
         InputStream *ist = fg->inputs[i]->ist;
         if (ist->sub2video.sub_queue && ist->sub2video.frame) {

@@ -204,7 +204,7 @@ typedef struct OptionsContext {
     int        nb_filters;
     SpecifierOpt *filter_scripts;
     int        nb_filter_scripts;
-    SpecifierOpt *reinit_filters;
+    SpecifierOpt *reinit_filters;           // -reinit_filter选项
     int        nb_reinit_filters;
     SpecifierOpt *fix_sub_duration;
     int        nb_fix_sub_duration;
@@ -234,7 +234,7 @@ typedef struct OptionsContext {
 
 //自定义封装输入过滤器结构体
 typedef struct InputFilter {
-    AVFilterContext    *filter;         // 指向buffer filter
+    AVFilterContext    *filter;         // 视频时:指向buffer.音频时:指向abuffer
     struct InputStream *ist;
     struct FilterGraph *graph;
     uint8_t            *name;
@@ -244,8 +244,11 @@ typedef struct InputFilter {
     typedef struct AVFifoBuffer {
         uint8_t *buffer;//开辟后的内存起始地址
         uint8_t *rptr, *wptr, *end;//rptr是指向可读地址，wptr指向可写地址，end指向开辟地址的末尾.初始化后rptr=wptr=buffer；
-        uint32_t rndx, wndx;//初始化后默认都是0
+        uint32_t rndx, wndx;//初始化后默认都是0,rndx代表此次已经读取的字节数,wndx代表已经写入的字节数(看源码)
     } AVFifoBuffer;
+    下面两个结论画图理解即可：
+    所以: wndx - rndx就是代表还剩余可读取的字节数大小,即av_fifo_size函数的实现.
+    f->end - f->buffer - av_fifo_size(f)代表fifo的剩余空间,f->end - f->buffer代表fifo队列的大小,即av_fifo_space函数的实现.
     */
     AVFifoBuffer *frame_queue;          // 输入过滤器帧队列的大小；初始化时是8帧，av_fifo_alloc(8 * sizeof(AVFrame*))。
 
@@ -261,11 +264,11 @@ typedef struct InputFilter {
 
     AVBufferRef *hw_frames_ctx;
 
-    int eof;
+    int eof;                                    // =1时,后续分析(可看configure_filtergraph)
 } InputFilter;
 
 typedef struct OutputFilter {
-    AVFilterContext     *filter;                // 输出过滤器ctx
+    AVFilterContext     *filter;                // 输出过滤器ctx, 视频时是:buffersink, 音频时是:abuffersink
     struct OutputStream *ost;                   // 输出流
     struct FilterGraph  *graph;                 // 指向FilterGraph封装的系统过滤器
     uint8_t             *name;
@@ -295,7 +298,7 @@ typedef struct FilterGraph {
     const char    *graph_desc;                  // 图形描述.为空表示是简单过滤器,不为空则不是. see filtergraph_is_simple()
 
     AVFilterGraph *graph;                       // 系统过滤器
-    int reconfiguration;
+    int reconfiguration;                        // 标记配置了AVFilterGraph?
 
     InputFilter   **inputs;                     // 输入文件过滤器描述，数组
     int          nb_inputs;                     // inputs数组的个数
@@ -321,9 +324,9 @@ typedef struct InputStream {
     int64_t       start;     /* time when read started *///单位微秒
     /* predicted dts of the next packet read for this stream or (when there are
      * several frames in a packet) of the next frame in current packet (in AV_TIME_BASE units) */
-    int64_t       next_dts;
+    int64_t       next_dts;  ///单位微秒
     int64_t       dts;       ///< dts of the last packet read for this stream (in AV_TIME_BASE units)
-                             ///(该流读取的最后一个包的dts)
+                             ///(该流读取的最后一个包的dts,单位微秒)
 
     int64_t       next_pts;  ///< synthetic pts for the next decode frame (in AV_TIME_BASE units)(下一个解码帧的合成PTS)
     int64_t       pts;       ///< current pts of the decoded frame  (in AV_TIME_BASE units)
@@ -372,9 +375,10 @@ typedef struct InputStream {
      * currently video and audio only */
     InputFilter **filters;                      // 对比输出流OutputStream可以看到，输入流可以有多个输入过滤器,
                                                 // 因为输出流的filters是一级指针，而这里输入流是二级指针
-    int        nb_filters;                      // **filters数组元素个数
+    int        nb_filters;                      // filters数组元素个数
 
-    int reinit_filters;
+    int reinit_filters;                         // -reinit_filter选项,输入流参数改变是否重新初始化filtergraph,
+                                                // =0时参数改变不会重新初始化,非0时会.默认值为-1,所以默认会重新初始化
 
     /* hwaccel options */
     enum HWAccelID hwaccel_id;                  // 硬件解码器id
@@ -527,6 +531,7 @@ typedef struct OutputStream {
 
     /* audio only */
     int *audio_channels_map;             /* list of the channels id to pick from the source stream */
+                                         // 要从源流中选择的通道id列表
     int audio_channels_mapped;           /* number of channels in audio_channels_map */
 
     char *logfile_prefix;
@@ -590,12 +595,12 @@ typedef struct OutputFile {
     AVDictionary *opts;     // 解复用选项，由o->g->format_opts拷贝得到.see open_output_file()
     int ost_index;          /* index of the first stream in output_streams */
     int64_t recording_time;  ///< desired length of the resulting file in microseconds == AV_TIME_BASE units
-                            //结果文件的期望长度(以微秒为单位)== AV_TIME_BASE单位.(录像时长？)
+                            //结果文件的期望长度(以微秒为单位)== AV_TIME_BASE单位.(录像时长)
 
     int64_t start_time;      ///< start time in microseconds == AV_TIME_BASE units
     uint64_t limit_filesize; /* filesize limit expressed in bytes(文件大小限制，以字节为单位),-fs选项.*/
 
-    int shortest;
+    int shortest;           // -shortest选项得到的值
 
     int header_written;     // =1表示调用avformat_write_header()成功.
 } OutputFile;
@@ -648,7 +653,7 @@ extern float max_error_rate;
 extern char *videotoolbox_pixfmt;
 
 extern int filter_nbthreads;                // -filter_threads选项,默认0,非复杂过滤器线程数.
-extern int filter_complex_nbthreads;
+extern int filter_complex_nbthreads;        // -filter_complex_threads选项,默认0,复杂过滤器线程数.
 extern int vstats_version;
 
 extern const AVIOInterruptCB int_cb;
