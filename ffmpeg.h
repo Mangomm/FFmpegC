@@ -121,7 +121,7 @@ typedef struct OptionsContext {
     int accurate_seek;                          //-accurate_seek选项,是否开启精确查找,与-ss有关
     int thread_queue_size;
 
-    SpecifierOpt *ts_scale;
+    SpecifierOpt *ts_scale;                     //-itsscale选项,默认是1.0,设置输入ts的刻度
     int        nb_ts_scale;
     SpecifierOpt *dump_attachment;
     int        nb_dump_attachment;
@@ -196,9 +196,9 @@ typedef struct OptionsContext {
     int        nb_metadata_map;
     SpecifierOpt *presets;
     int        nb_presets;
-    SpecifierOpt *copy_initial_nonkeyframes;
+    SpecifierOpt *copy_initial_nonkeyframes;// -copyinkf选项
     int        nb_copy_initial_nonkeyframes;
-    SpecifierOpt *copy_prior_start;
+    SpecifierOpt *copy_prior_start;         // -copypriorss选项,在开始时间之前复制或丢弃帧
     int        nb_copy_prior_start;
     SpecifierOpt *filters;
     int        nb_filters;
@@ -264,7 +264,7 @@ typedef struct InputFilter {
 
     AVBufferRef *hw_frames_ctx;
 
-    int eof;                                    // =1时,后续分析(可看configure_filtergraph)
+    int eof;                                    // 解码完成遇到eof时,可能会通过send_filter_eof()置为1?(可看process_input_packet,configure_filtergraph)
 } InputFilter;
 
 typedef struct OutputFilter {
@@ -309,7 +309,7 @@ typedef struct FilterGraph {
 typedef struct InputStream {
     int file_index;             // 输入文件的下标.例如-i 1.mp4 -i 2.mp4,两个输入文件下标依次是0,1
     AVStream *st;
-    int discard;                /* true if stream data should be discarded */
+    int discard;                /* true if stream data should be discarded *///=1,该流读到的包都会被丢弃
     int user_set_discard;
     int decoding_needed;        /* non zero if the packets must be decoded in 'raw_fifo', see DECODING_FOR_* */
                                 // 非0表示输入流需要进行转码操作
@@ -330,9 +330,9 @@ typedef struct InputStream {
 
     int64_t       next_pts;  ///< synthetic pts for the next decode frame (in AV_TIME_BASE units)(下一个解码帧的合成PTS)
     int64_t       pts;       ///< current pts of the decoded frame  (in AV_TIME_BASE units)
-    int           wrap_correction_done;
+    int           wrap_correction_done;     // ?,see process_input()
 
-    int64_t filter_in_rescale_delta_last;
+    int64_t filter_in_rescale_delta_last;   // 仅音频:统计样本数?debug看到该值一直会以样本数递增,例如0-1024-2048-3072...
 
     int64_t min_pts; /* pts with the smallest value in a current stream */
     int64_t max_pts; /* pts with the higher value in a current stream */
@@ -344,7 +344,7 @@ typedef struct InputStream {
 
     int64_t nb_samples; /* number of samples in the last decoded audio frame before looping.循环前最后解码音频帧中的采样数 */
 
-    double ts_scale;
+    double ts_scale;                    // -itsscale选项,默认是1.0,设置输入ts的刻度
     int saw_first_ts;                   // 是否是第一次进来的时间戳,用于处理输入流InputStream的dts/pts(see process_input_packet).
     AVDictionary *decoder_opts;         // 用户输入的解码器选项,是从o中复制的
     AVRational framerate;               /* framerate forced with -r */
@@ -396,42 +396,43 @@ typedef struct InputStream {
     AVBufferRef *hw_frames_ctx;
 
     /* stats */
-    // combined size of all the packets read
-    uint64_t data_size;
+    // combined size of all the packets read(读取的所有包的大小之和)
+    uint64_t data_size;             // 已经读取的包的总字节大小
     /* number of packets successfully read for this stream */
-    uint64_t nb_packets;
+    uint64_t nb_packets;            // 已经读取的包的总数
     // number of frames/samples retrieved from the decoder(从解码器检索到的帧/样本数)
     uint64_t frames_decoded;        // 解码器已经解码的帧数
-    uint64_t samples_decoded;
+    uint64_t samples_decoded;       // 已经解码的样本数,仅音频有效
 
     int64_t *dts_buffer;            // eof时,统计有几个dts被保存到该数组.see decode_video()
     int nb_dts_buffer;              // dts_buffer的大小
 
-    int got_output;
+    int got_output;                 // =1:标记该输入流至少已经成功解码一个pkt. see process_input_packet()
 } InputStream;
 
 // 封装输入文件相关信息的结构体
 typedef struct InputFile {
     AVFormatContext *ctx; // 输入文件的ctx
-    int eof_reached;      /* true if eof reached */
+    int eof_reached;      /* true if eof reached */// =1: 输入文件遇到eof
     int eagain;           /* true if last read attempt returned EAGAIN(如果上次读取尝试返回EAGAIN则为真) */
                           //=1表示上一次读pkt时,返回了eagain
 
     int ist_index;        /* index of first stream in input_streams *///输入文件中第一个流的下标,一般为0
     int loop;             /* set number of times input stream should be looped *///循环次数.例如无限次,-stream_loop -1
     int64_t duration;     /* actual duration of the longest stream in a file
-                             at the moment when looping happens */
-    AVRational time_base; /* time base of the duration */
+                             at the moment when looping happens(循环发生时文件中最长流的实际持续时间,即stream_loop选项) */
+                          // 该输入文件中时长为最长的流的duration
+    AVRational time_base; /* time base of the duration */ // 上面duration字段的时基
     int64_t input_ts_offset;
 
-    int64_t ts_offset;
-    int64_t last_ts;
+    int64_t ts_offset;    // ?
+    int64_t last_ts;      // 上一个ptk的dts
     int64_t start_time;   /* user-specified start time in AV_TIME_BASE or AV_NOPTS_VALUE */
     int seek_timestamp;
     int64_t recording_time;
     int nb_streams;       /* number of stream that ffmpeg is aware of; may be different
                              from ctx.nb_streams if new streams appear during av_read_frame() */
-    int nb_streams_warn;  /* number of streams that the user was warned of */
+    int nb_streams_warn;  /* number of streams that the user was warned of(警告用户的流的数量) */
     int rate_emu;               // -re选项。从OptionsContext.rate_emu得到，用户输入-re选项，rate_emu的值为1
     int accurate_seek;
 
@@ -443,7 +444,7 @@ typedef struct InputFile {
     int non_blocking;           /* reading packets from the thread should not block(从线程读取数据包不应该被阻塞) */
                                 // 存在多个输入文件即多线程读取时,av_read_frame是否阻塞,0=阻塞,1=非阻塞
 
-    int joined;                 /* the thread has been joined */
+    int joined;                 /* the thread has been joined */ // 0=未被回收,1=已经回收该线程thread
     int thread_queue_size;      /* maximum number of queued packets */
 #endif
 } InputFile;
@@ -477,7 +478,7 @@ typedef struct OutputStream {
 
     AVStream *st;            /* stream in the output file */
     int encoding_needed;     /* true if encoding needed for this stream *///是否需要编码；0=不需要 1=需要.一般由!stream_copy得到
-    int frame_number;
+    int frame_number;        // 已经编码的帧数 或者 叫已经写帧的数量? 控制台就是打印这个值
     /* input pts and corresponding output pts
        for A/V sync */
     struct InputStream *sync_ist; /* input stream to sync against */
@@ -548,7 +549,7 @@ typedef struct OutputStream {
     AVDictionary *resample_opts;        // 重采样选项.
     char *apad;
     OSTFinished finished;               /* no more packets should be written for this stream(输出流完成，则不应该再为该流写入任何信息包) */
-    int unavailable;                    /* true if the steram is unavailable (possibly temporarily) */
+    int unavailable;                    /* true if the steram is unavailable (possibly temporarily) *///流是否可用,循环时开始会重置它为0
     int stream_copy;                    // 是否不转码输出，例如-vcodec copy选项.0=转码 1=不转码.只要置为0，音视频都会进入转码的流程。see choose_encoder()
 
     // init_output_stream() has been called for this stream
@@ -559,8 +560,8 @@ typedef struct OutputStream {
     int inputs_done;                    // =1表示输入流全部处理完成,see transcode_step()
 
     const char *attachment_filename;
-    int copy_initial_nonkeyframes;      // 对应OptionsContext.copy_initial_nonkeyframes
-    int copy_prior_start;               // 对应OptionsContext.copy_prior_start
+    int copy_initial_nonkeyframes;      // 对应OptionsContext.copy_initial_nonkeyframes.复制最初的非关键帧
+    int copy_prior_start;               // 对应OptionsContext.copy_prior_start.在开始时间之前复制或丢弃帧
     char *disposition;                  // 对应OptionsContext.disposition，即-disposition选项
 
     int keep_pix_fmt;
@@ -576,7 +577,7 @@ typedef struct OutputStream {
     uint64_t samples_encoded;
 
     /* packet quality factor */
-    int quality;                        // 编码质量，等价于ffmpeg命令行打印的q
+    int quality;                        // 编码质量，等价于ffmpeg命令行打印的q.在write_packet()得到
 
     int max_muxing_queue_size;          // 默认最大复用队列的大小为128，new_output_stream时指定
 
@@ -584,7 +585,7 @@ typedef struct OutputStream {
     AVFifoBuffer *muxing_queue;         // new_output_stream时开辟内存.
 
     /* packet picture type */
-    int pict_type;                      //
+    int pict_type;                      // 帧类型
 
     /* frame encode sum of squared error values */
     int64_t error[4];                   // 用于存储编码时的错误
@@ -626,7 +627,7 @@ extern char *vstats_filename;
 extern char *sdp_filename;
 
 extern float audio_drift_threshold;         // -adrift_threshold选项,默认0.1
-extern float dts_delta_threshold;
+extern float dts_delta_threshold;           // -dts_delta_threshold选项,默认10,时间戳不连续增量阈值
 extern float dts_error_threshold;
 
 extern int audio_volume;                    // -vol选项,默认256
@@ -636,16 +637,16 @@ extern float frame_drop_threshold;
 extern int do_benchmark;
 extern int do_benchmark_all;                // -benchmark_all选项，默认0
 extern int do_deinterlace;
-extern int do_hex_dump;
-extern int do_pkt_dump;
+extern int do_hex_dump;                     // -hex选项,当指定-dump选项dump pkt,也dump payload
+extern int do_pkt_dump;                     // -dump选项,默认0
 extern int copy_ts;                         // -copyts选项，默认0
 extern int start_at_zero;                   // -start_at_zero选项，默认0
 extern int copy_tb;
 extern int debug_ts;
-extern int exit_on_error;
+extern int exit_on_error;                   // -xerror选项,默认是0
 extern int abort_on_flags;
-extern int print_stats;
-extern int qp_hist;
+extern int print_stats;                     // -stats选项,默认-1,在编码期间打印进度报告.
+extern int qp_hist;                         // -qphist选项,默认0,显示QP直方图
 extern int stdin_interaction;
 extern int frame_bits_per_raw_sample;
 extern AVIOContext *progress_avio;

@@ -107,10 +107,10 @@ int copy_ts           = 0;
 int start_at_zero     = 0;
 int copy_tb           = -1;
 int debug_ts          = 0;              // 是否打印相关时间戳.-debug_ts选项
-int exit_on_error     = 0;              // xerror选项
+int exit_on_error     = 0;              // xerror选项,默认是0
 int abort_on_flags    = 0;
-int print_stats       = -1;
-int qp_hist           = 0;
+int print_stats       = -1;             // -stats选项,默认-1,在编码期间打印进度报告.
+int qp_hist           = 0;              // -qphist选项,默认0,显示QP直方图
 int stdin_interaction = 1;              // 可认为是否是交互模式.除pipe、以及/dev/stdin值为0，其它例如普通文件、实时流都是1
 int frame_bits_per_raw_sample = 0;
 float max_error_rate  = 2.0/3;
@@ -232,6 +232,7 @@ static AVDictionary *strip_specifiers(AVDictionary *dict)
     return ret;
 }
 
+// 中止指定的条件标志
 static int opt_abort_on(void *optctx, const char *opt, const char *arg)
 {
     static const AVOption opts[] = {
@@ -247,7 +248,7 @@ static int opt_abort_on(void *optctx, const char *opt, const char *arg)
     };
     const AVClass *pclass = &class;
 
-    return av_opt_eval_flags(&pclass, &opts[0], arg, &abort_on_flags);
+    return av_opt_eval_flags(&pclass, &opts[0], arg, &abort_on_flags);// 使用参3给参4赋值.
 }
 
 static int opt_sameq(void *optctx, const char *opt, const char *arg)
@@ -3996,6 +3997,9 @@ fail:
     return ret;
 }
 
+/**
+ * @brief 编写程序可读的进度信息,-progress选项的回调函数.
+ */
 static int opt_progress(void *optctx, const char *opt, const char *arg)
 {
     AVIOContext *avio = NULL;
