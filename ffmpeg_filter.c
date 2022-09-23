@@ -1337,17 +1337,23 @@ static void cleanup_filtergraph(FilterGraph *fg)
 }
 
 /**
- * @brief 配置每个流的FilterGraph.以视频流为例,配置完后, 可能是这样的:
- *      buffer->insert_filter函数的滤镜(transpose,hflip,vflip,rotate)->yadif->trim->(in->filter_ctx);(输入)
- *      (out->filter_ctx)->scale->format->fps->trim->buffersink;(输出),
- * 其中: in->filter_ctx = out->filter_ctx;
+ * @brief 配置每个流的FilterGraph.
+ * 视频流配置完后, 可能是这样的:
+ * buffer->insert_filter函数的滤镜(transpose,hflip,vflip,rotate)->yadif->trim->(in->filter_ctx);(输入)
+ * (out->filter_ctx)->scale->format->fps->trim->buffersink;(输出)
+ * 音频流配置完后, 可能是这样的:
+ * abuffer->aresample->volume->trim->(in->filter_ctx);
+ * (out->filter_ctx)->pan->aformat->volume->apad->trim->abuffersink。
+ *
+ * 其中音视频都有: in->filter_ctx = out->filter_ctx;
+ *
  * @param fg fg
  * @return 成功-0 失败-负数或者程序退出
  */
 int configure_filtergraph(FilterGraph *fg)
 {
     AVFilterInOut *inputs, *outputs, *cur;
-    int ret, i, simple = filtergraph_is_simple(fg);//按例子的推流命令时,simple=1
+    int ret, i, simple = filtergraph_is_simple(fg);// 按例子的推流命令时,simple=1
     const char *graph_desc = simple ? fg->outputs[0]->ost->avfilter :
                                       fg->graph_desc;//graph_desc一般是"null"或者"anull"
 

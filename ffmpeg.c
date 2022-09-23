@@ -499,11 +499,15 @@ static void ffmpeg_cleanup(int ret)
         av_log(NULL, AV_LOG_INFO, "bench: maxrss=%ikB\n", maxrss);
     }
 
+    // 1. 释放fg数组相关内容
     for (i = 0; i < nb_filtergraphs; i++) {
         FilterGraph *fg = filtergraphs[i];
+        // 1.1 释放滤波图
         avfilter_graph_free(&fg->graph);
+
+        // 1.2 释放InputFilter数组
         for (j = 0; j < fg->nb_inputs; j++) {
-            while (av_fifo_size(fg->inputs[j]->frame_queue)) {
+            while (av_fifo_size(fg->inputs[j]->frame_queue)) {//释放帧队列剩余的帧
                 AVFrame *frame;
                 av_fifo_generic_read(fg->inputs[j]->frame_queue, &frame,
                                      sizeof(frame), NULL);
@@ -524,6 +528,8 @@ static void ffmpeg_cleanup(int ret)
             av_freep(&fg->inputs[j]);
         }
         av_freep(&fg->inputs);
+
+        // 1.3 释放OutputFilter数组
         for (j = 0; j < fg->nb_outputs; j++) {
             av_freep(&fg->outputs[j]->name);
             av_freep(&fg->outputs[j]->formats);
@@ -534,12 +540,15 @@ static void ffmpeg_cleanup(int ret)
         av_freep(&fg->outputs);
         av_freep(&fg->graph_desc);
 
+        // 1.4 释放fg元素
         av_freep(&filtergraphs[i]);
     }
+    // 1.5 释放fg数组本身
     av_freep(&filtergraphs);
 
     av_freep(&subtitle_out);
 
+    // 2. 关闭输出文件
     /* close files */
     for (i = 0; i < nb_output_files; i++) {
         OutputFile *of = output_files[i];
@@ -554,6 +563,8 @@ static void ffmpeg_cleanup(int ret)
 
         av_freep(&output_files[i]);
     }
+
+    // 3. 关闭输出流
     for (i = 0; i < nb_output_streams; i++) {
         OutputStream *ost = output_streams[i];
 
@@ -579,7 +590,7 @@ static void ffmpeg_cleanup(int ret)
         av_dict_free(&ost->sws_dict);
         av_dict_free(&ost->swr_opts);
 
-        avcodec_free_context(&ost->enc_ctx);
+        avcodec_free_context(&ost->enc_ctx);// 释放编码器上下文
         avcodec_parameters_free(&ost->ref_par);
 
         if (ost->muxing_queue) {
@@ -593,13 +604,19 @@ static void ffmpeg_cleanup(int ret)
 
         av_freep(&output_streams[i]);
     }
+
+    // 4. 回收输入线程
 #if HAVE_THREADS
     free_input_threads();
 #endif
+
+    // 5. 关闭输入文件
     for (i = 0; i < nb_input_files; i++) {
         avformat_close_input(&input_files[i]->ctx);
         av_freep(&input_files[i]);
     }
+
+    // 6. 关闭输入流
     for (i = 0; i < nb_input_streams; i++) {
         InputStream *ist = input_streams[i];
 
@@ -612,7 +629,7 @@ static void ffmpeg_cleanup(int ret)
         av_freep(&ist->hwaccel_device);
         av_freep(&ist->dts_buffer);
 
-        avcodec_free_context(&ist->dec_ctx);
+        avcodec_free_context(&ist->dec_ctx);// 关闭解码器上下文
 
         av_freep(&input_streams[i]);
     }
@@ -625,6 +642,7 @@ static void ffmpeg_cleanup(int ret)
     }
     av_freep(&vstats_filename);
 
+    // 7. 关闭输入输出文件、流数组本身.
     av_freep(&input_streams);
     av_freep(&input_files);
     av_freep(&output_streams);
@@ -739,7 +757,7 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
      * 由于重新排序，编码的视频帧需要单独计数，参见do_video_out()。
      * 不要在未排队时计数数据包，因为它在排队时已被计数。
      */
-    /*1."视频需要编码"以外的类型，且unqueue=0时，会判断是否需要丢包.*/
+    /* 1."视频需要编码"以外的类型，且unqueue=0时，会判断是否需要丢包. */
     if (!(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && ost->encoding_needed) && !unqueue) {
         if (ost->frame_number >= ost->max_frames) {//帧数大于允许的最大帧数，不作处理，并将该包释放
             av_packet_unref(pkt);
@@ -748,7 +766,7 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
         ost->frame_number++;//视频流时，不会在这里计数
     }
 
-    /*2.没有写头或者写头失败，先将包缓存在复用队列，然后返回，不会调用到写帧函数*/
+    /* 2.没有写头或者写头失败，先将包缓存在复用队列，然后返回，不会调用到写帧函数 */
     if (!of->header_written) {
         AVPacket tmp_pkt = {0};
         /* the muxer is not initialized yet, buffer the packet(muxer尚未初始化，请缓冲该数据包) */
@@ -934,7 +952,7 @@ static void close_output_stream(OutputStream *ost)
     OutputFile *of = output_files[ost->file_index];
 
     ost->finished |= ENCODER_FINISHED;
-    if (of->shortest) {//应该与录像时，时间限制有关
+    if (of->shortest) {//重新设置录像时长.
         int64_t end = av_rescale_q(ost->sync_opts - ost->first_pts, ost->enc_ctx->time_base, AV_TIME_BASE_Q);
         of->recording_time = FFMIN(of->recording_time, end);
     }
@@ -1579,6 +1597,11 @@ static double psnr(double d)
     return -10.0 * log10(d);
 }
 
+/**
+ * @brief 往vstats_file文件写入视频流的相关信息
+ * @param ost 输出流
+ * @param frame_size 帧大小
+ */
 static void do_video_stats(OutputStream *ost, int frame_size)
 {
     AVCodecContext *enc;
@@ -1586,6 +1609,7 @@ static void do_video_stats(OutputStream *ost, int frame_size)
     double ti1, bitrate, avg_bitrate;
 
     /* this is executed just the first time do_video_stats is called */
+    //这只在第一次调用do_video_stats时执行
     if (!vstats_file) {
         vstats_file = fopen(vstats_filename, "w");
         if (!vstats_file) {
@@ -1596,7 +1620,7 @@ static void do_video_stats(OutputStream *ost, int frame_size)
 
     enc = ost->enc_ctx;
     if (enc->codec_type == AVMEDIA_TYPE_VIDEO) {
-        frame_number = ost->st->nb_frames;
+        frame_number = ost->st->nb_frames;//这个流的帧数
         if (vstats_version <= 1) {
             fprintf(vstats_file, "frame= %5d q= %2.1f ", frame_number,
                     ost->quality / (float)FF_QP2LAMBDA);
@@ -1661,7 +1685,7 @@ static int reap_filters(int flush)
     int i;
 
     /* Reap all buffers present in the buffer sinks */
-    /*1.获取在buffer sinks中存在的所有缓冲区*/
+    /* 1.获取在buffer sinks中存在的所有缓冲区 */
     for (i = 0; i < nb_output_streams; i++) {
         OutputStream *ost = output_streams[i];
         OutputFile    *of = output_files[ost->file_index];
@@ -1669,9 +1693,10 @@ static int reap_filters(int flush)
         AVCodecContext *enc = ost->enc_ctx;
         int ret = 0;
 
-        /*1.1若ost->filter为空或者ost->filter->graph->graph为空则跳过。
+        /* 1.1若ost->filter为空或者ost->filter->graph->graph为空则跳过。
          * ost->filter在init_simple_filtergraph()时被创建。
          * AVFilterGraph是什么时候？在configure_filtergraph().
+         * configure_filtergraph()什么时候被调用?在该输入流的pkt被解码第一帧的时候.
          */
         if (!ost->filter || !ost->filter->graph->graph)
             continue;
@@ -2179,6 +2204,9 @@ static void ifilter_parameters_from_codecpar(InputFilter *ifilter, AVCodecParame
     ifilter->sample_aspect_ratio    = par->sample_aspect_ratio;
 }
 
+/**
+ * @brief 将每个输出流的编码器剩余pkt清空.
+ */
 static void flush_encoders(void)
 {
     int i, ret;
@@ -2194,7 +2222,7 @@ static void flush_encoders(void)
 
         // Try to enable encoding with no input frames.(尝试启用无输入帧的编码)
         // Maybe we should just let encoding fail instead.(也许我们应该让编码失败)
-        // 2. 没有调ongoinginit_output_stream初始化输出流, 重新初始化.
+        // 2. 没有调用init_output_stream初始化输出流, 重新初始化.
         if (!ost->initialized) {
             FilterGraph *fg = ost->filter->graph;
             char error[1024] = "";
@@ -2209,7 +2237,7 @@ static void flush_encoders(void)
                 // 2.1.1 初始化每个输入过滤器的format
                 for (x = 0; x < fg->nb_inputs; x++) {
                     InputFilter *ifilter = fg->inputs[x];
-                    if (ifilter->format < 0)
+                    if (ifilter->format < 0)//这里看到ffmpeg每次配置滤波图都要初始化输入过滤器的参数
                         ifilter_parameters_from_codecpar(ifilter, ifilter->ist->st->codecpar);
                 }
 
@@ -2245,6 +2273,7 @@ static void flush_encoders(void)
         if (enc->codec_type != AVMEDIA_TYPE_VIDEO && enc->codec_type != AVMEDIA_TYPE_AUDIO)
             continue;
 
+        // 2. 清空编码器
         for (;;) {
             const char *desc = NULL;
             AVPacket pkt;
@@ -2267,6 +2296,7 @@ static void flush_encoders(void)
 
             update_benchmark(NULL);
 
+            // flush 编码器的实际操作: 从编码器读取eagain, 那么一直往编码器发送空帧,直至遇到非eagain
             while ((ret = avcodec_receive_packet(enc, &pkt)) == AVERROR(EAGAIN)) {
                 ret = avcodec_send_frame(enc, NULL);
                 if (ret < 0) {
@@ -2287,22 +2317,30 @@ static void flush_encoders(void)
             if (ost->logfile && enc->stats_out) {
                 fprintf(ost->logfile, "%s", enc->stats_out);
             }
+
+            /* 这里对剩余编码器的包的处理:
+             * 1)eof: 调用output_packet,参4传1,实际上没有使用位流的话,内部没处理任何内容.
+             * 2)正常读到剩余的包: 若输出流已经完成,那么不要该包了,直接释放引用,然后返回处理下一个包;
+             *                  若输出流没完成,那么继续 将该包输出到输出url. */
             if (ret == AVERROR_EOF) {
                 output_packet(of, &pkt, ost, 1);
-                break;
+                break;//该输出流flush encoder完成,退出for处理下一个输出流
             }
             if (ost->finished & MUXER_FINISHED) {
                 av_packet_unref(&pkt);
                 continue;
             }
+
+            //没有遇到eof或者输出流没完成,那么继续将该包输出到输出url
             av_packet_rescale_ts(&pkt, enc->time_base, ost->mux_timebase);
             pkt_size = pkt.size;
             output_packet(of, &pkt, ost, 0);
             if (ost->enc_ctx->codec_type == AVMEDIA_TYPE_VIDEO && vstats_filename) {
                 do_video_stats(ost, pkt_size);
             }
-        }
-    }
+        }//<== for (;;) end ==>
+
+    }//<== for (i = 0; i < nb_output_streams; i++) end ==>
 }
 
 /*
@@ -2549,7 +2587,7 @@ static int ifilter_send_frame(InputFilter *ifilter, AVFrame *frame)
     need_reinit = ifilter->format != frame->format;//判断输入流与解码后的帧格式是否不一致
 
     // 1. 判断输入流的输入过滤器是否需要重新初始化.
-    //判断依据:输入流中的输入过滤器保存的参数 是否与 解码帧的参数 存在不一样.
+    // 判断依据:输入流中的输入过滤器保存的参数 是否与 解码帧的参数 存在不一样.
     switch (ifilter->ist->st->codecpar->codec_type) {
     case AVMEDIA_TYPE_AUDIO:
         need_reinit |= ifilter->sample_rate    != frame->sample_rate ||
@@ -2615,8 +2653,8 @@ static int ifilter_send_frame(InputFilter *ifilter, AVFrame *frame)
         }
 
         // 5.2 编码、写帧操作.
-        // 第一次进时由于每个输出流的ost->filter->graph->graph没初始化,会在for中执行continue,然后返回0.
-        // 一般不是这里调用去编码的,因为fg->graph为空,reap_filters会返回,这里调用reap_filters是为了处理need_reinit=1的逻辑.
+        // 一般不是这里调用去编码的.
+        // 这里调用reap_filters(1)是为了处理need_reinit=1,fg->graph!=NULL时,输出旧过滤器的一帧解码帧到输出url.
         ret = reap_filters(1);
         if (ret < 0 && ret != AVERROR_EOF) {
             av_log(NULL, AV_LOG_ERROR, "Error while filtering: %s\n", av_err2str(ret));
@@ -2707,7 +2745,7 @@ static int decode(AVCodecContext *avctx, AVFrame *frame, int *got_frame, AVPacke
         // In particular, we don't expect AVERROR(EAGAIN), because we read all
         // decoded frames with avcodec_receive_frame() until done.
         // (特别是，我们不期望AVERROR(EAGAIN)，因为我们使用avcodec_receive_frame()读取所有已解码的帧，直到完成)
-        if (ret < 0 && ret != AVERROR_EOF)//除了eof,发包错误都会直接返回.
+        if (ret < 0 && ret != AVERROR_EOF)// 除了eof,发包错误都会直接返回.
             return ret;
     }
 
@@ -2736,7 +2774,7 @@ static int send_frame_to_filters(InputStream *ist, AVFrame *decoded_frame)
     AVFrame *f;
 
     av_assert1(ist->nb_filters > 0); /* ensure ret is initialized */
-    // 1. 遍历输入流的每个过滤器(正常一个输入流只有InputFilter,即nb_filters=1).
+    // 1. 遍历输入流的每个过滤器(正常一个输入流只有一个InputFilter,即nb_filters=1).
     for (i = 0; i < ist->nb_filters; i++) {
         // 1.1 获取f的值.
         if (i < ist->nb_filters - 1) {//减1意义是: 只有当nb_filters>1时, 才会走这个if
@@ -3130,7 +3168,7 @@ static int send_filter_eof(InputStream *ist)
 /**
  * @brief 处理输入pkt.会调用解码函数进行处理.
  * @param ist 输入流
- * @param pkt 为空时,代表刷空包冲刷解码器
+ * @param pkt 为空时,代表eof到来,需要刷空包冲刷解码器
  * @param no_eof eof到来,是由它决定是否发送eof给输入过滤器,0-发送,1-不发送.
  *
  * @return 0-eof到来; 1-eof未到来
@@ -3303,6 +3341,7 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
     /* except when looping we need to flush but not to send an EOF(除非在循环时我们需要刷新但不发送EOF) */
     // 6. 刷空包 且 转码 且 eof到来 且 no_eof=0,那么发送eof给流对应的输入过滤器.
     // no_eof是关键,一般eof到来,是由它决定是否发送eof给过滤器.
+    // 只有真正eof结束才会进来.若是eof但指定stream_loop循环,不会进来.
     if (!pkt && ist->decoding_needed && eof_reached && !no_eof) {
         int ret = send_filter_eof(ist);
         if (ret < 0) {
@@ -3528,10 +3567,10 @@ static int init_input_stream(int ist_index, char *error, int error_len)
     int ret;
     InputStream *ist = input_streams[ist_index];
 
-    /*1.输入流需要转码的流程*/
+    /* 1.输入流需要转码的流程 */
     if (ist->decoding_needed) {
-        /*1.1获取输入流的编解码器.
-         * 解码器在add_input_streams时已经赋值*/
+        /* 1.1获取输入流的编解码器.
+         * 解码器在add_input_streams时已经赋值 */
         AVCodec *codec = ist->dec;
         if (!codec) {
             snprintf(error, error_len, "Decoder (codec %s) not found for input stream #%d:%d",
@@ -3539,11 +3578,11 @@ static int init_input_stream(int ist_index, char *error, int error_len)
             return AVERROR(EINVAL);
         }
 
-        /*1.2在add_input_streams对ist赋值的基础上，再对ist相关内容赋值*/
+        /* 1.2在add_input_streams对ist赋值的基础上，再对ist相关内容赋值 */
         ist->dec_ctx->opaque                = ist;
-        ist->dec_ctx->get_format            = get_format;
-        ist->dec_ctx->get_buffer2           = get_buffer;
-        ist->dec_ctx->thread_safe_callbacks = 1;
+        ist->dec_ctx->get_format            = get_format;// 自定义获取像素格式,主要与硬件加速相关
+        ist->dec_ctx->get_buffer2           = get_buffer;// 自定义获取buffer,主要与硬件加速相关
+        ist->dec_ctx->thread_safe_callbacks = 1;         // 当用户自定义get_buffer,那么需要设置该值
 
         /*
          * 在AVCodecContext结构体中对refcounted_frames成员的解释：如果非零，则从avcodec_decode_video2()和avcodec_decode_audio4()返回的解码音
@@ -3554,16 +3593,16 @@ static int init_input_stream(int ist_index, char *error, int error_len)
         */
         av_opt_set_int(ist->dec_ctx, "refcounted_frames", 1, 0);
 
-        if (ist->dec_ctx->codec_id == AV_CODEC_ID_DVB_SUBTITLE &&/*dvb字幕类型*/
-           (ist->decoding_needed & DECODING_FOR_OST)) {/*该输出流需要重新编码,open_output_file有：ist->decoding_needed |= DECODING_FOR_OST*/
-            /*为dvb字幕设置compute_edt选项，该选项搜compute_edt源码看到，它作用是: 使用pts或timeout计算时间结束.
-            AV_DICT_DONT_OVERWRITE：若存在该key，则不覆盖已有的value*/
+        if (ist->dec_ctx->codec_id == AV_CODEC_ID_DVB_SUBTITLE && /* dvb字幕类型 */
+           (ist->decoding_needed & DECODING_FOR_OST)) {/* 该输入流需要重新解码,open_output_file有：ist->decoding_needed |= DECODING_FOR_OST */
+            /* 为dvb字幕设置compute_edt选项，该选项搜compute_edt源码看到，它作用是: 使用pts或timeout计算时间结束.
+            AV_DICT_DONT_OVERWRITE：若存在该key，则不覆盖已有的value */
             av_dict_set(&ist->decoder_opts, "compute_edt", "1", AV_DICT_DONT_OVERWRITE);
             if (ist->decoding_needed & DECODING_FOR_FILTER)
                 av_log(NULL, AV_LOG_WARNING, "Warning using DVB subtitles for filtering and output at the same time is not fully supported, also see -compute_edt [0|1]\n");
         }
 
-        /*默认输入文件的字幕类型为ass？*/
+        /* 默认输入文件的字幕类型为ass? */
         av_dict_set(&ist->decoder_opts, "sub_text_format", "ass", AV_DICT_DONT_OVERWRITE);
 
         /* Useful for subtitles retiming by lavf (FIXME), skipping samples in
@@ -3573,7 +3612,7 @@ static int init_input_stream(int ist_index, char *error, int error_len)
         */
         ist->dec_ctx->pkt_timebase = ist->st->time_base;
 
-        /*若用户没指定threads选项，则默认"auto"*/
+        /* 若用户没指定threads选项，则默认"auto" */
         if (!av_dict_get(ist->decoder_opts, "threads", NULL, 0))
             av_dict_set(&ist->decoder_opts, "threads", "auto", 0);
         /* Attached pics are sparse, therefore we would not want to delay their decoding till EOF.
@@ -3583,7 +3622,7 @@ static int init_input_stream(int ist_index, char *error, int error_len)
         if (ist->st->disposition & AV_DISPOSITION_ATTACHED_PIC)
             av_dict_set(&ist->decoder_opts, "threads", "1", 0);
 
-        /*1.3对输入流的硬件相关处理.后续再详细研究*/
+        /* 1.3对输入流的硬件相关处理.推流没用到,后续再详细研究. */
         ret = hw_device_setup_for_decode(ist);
         if (ret < 0) {
             snprintf(error, error_len, "Device setup failed for "
@@ -3592,8 +3631,8 @@ static int init_input_stream(int ist_index, char *error, int error_len)
             return ret;
         }
 
-        /*1.4编解码器上下文与编解码器关联.
-        这里看到，编解码器的相关选项是在这里被应用的*/
+        /* 1.4编解码器上下文与编解码器关联.
+         * 这里看到，编解码器的相关选项是在这里被应用的 */
         if ((ret = avcodec_open2(ist->dec_ctx, codec, &ist->decoder_opts)) < 0) {
             if (ret == AVERROR_EXPERIMENTAL)
                 abort_codec_experimental(codec, 0);
@@ -3605,13 +3644,13 @@ static int init_input_stream(int ist_index, char *error, int error_len)
             return ret;
         }
 
-        /*1.5检测是否含有多余的选项.
-        当avcodec_open2成功打开后，若decoder_opts包含未知选项，会返回在decoder_opts中，
-        所以此时decoder_opts只要有一个选项，就说明是非法的*/
+        /* 1.5检测是否含有多余的选项.
+         * 当avcodec_open2成功打开后，若decoder_opts包含未知选项，会返回在decoder_opts中，
+         * 所以此时decoder_opts只要有一个选项，就说明是非法的 */
         assert_avoptions(ist->decoder_opts);
     }
 
-    /*2.输入流不需要转码的流程*/
+    /* 2.输入流不需要转码的流程 */
     ist->next_pts = AV_NOPTS_VALUE;
     ist->next_dts = AV_NOPTS_VALUE;
 
@@ -3649,7 +3688,7 @@ static int check_init_output_file(OutputFile *of, int file_index)
     int ret, i;
 
     /*1.检查每个输出流是否都已经被初始化.
-     注，只有使用输出流完成初始化才会写头.*/
+     注，只有所有输出流完成初始化才会写头.*/
     for (i = 0; i < of->ctx->nb_streams; i++) {
         OutputStream *ost = output_streams[of->ost_index + i];//of->ost_index基本是0,暂时还没遇到过第一个流不是0的情况
         if (!ost->initialized)
@@ -4122,17 +4161,17 @@ static int init_output_stream_encode(OutputStream *ost)
     AVFormatContext *oc = output_files[ost->file_index]->ctx;//获取输出流对应输出文件的oc
     int j, ret;
 
-    /*1.给输出流的元数据添加encoder选项*/
+    /* 1.给输出流的元数据添加encoder选项 */
     set_encoder_id(output_files[ost->file_index], ost);
 
     // Muxers use AV_PKT_DATA_DISPLAYMATRIX to signal rotation. On the other
     // hand, the legacy API makes demuxers set "rotate" metadata entries,
     // which have to be filtered out to prevent leaking them to output files.
     /*(muxer使用AV_PKT_DATA_DISPLAYMATRIX来表示旋转。另一方面，遗留API使解复用器设置“旋转”元数据条目，这些条目必须被过滤掉，以防止泄漏到输出文件中。)*/
-    /*2.若输出流的元数据存在rotate选项，则将其删除*/
+    /* 2.若输出流的元数据存在rotate选项，则将其删除 */
     av_dict_set(&ost->st->metadata, "rotate", NULL, 0);
 
-    /*3.主要初始化流的disposition*/
+    /* 3.主要初始化流的disposition */
     if (ist) {
         ost->st->disposition          = ist->st->disposition;/*这个流中的disposition成员好像与附属图片相关*/
 
@@ -4153,9 +4192,9 @@ static int init_output_stream_encode(OutputStream *ost)
                 ost->st->disposition = AV_DISPOSITION_DEFAULT;
     }
 
-    /*4.获取视频帧率*/
+    /* 4.获取视频帧率 */
     if (enc_ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
-        /*若用户没有指定帧率，优先从过滤器中获取，if条件越在上面，优先级越高*/
+        /* 若用户没有指定帧率，优先从过滤器中获取，if条件越在上面，优先级越高 */
         if (!ost->frame_rate.num)
             ost->frame_rate = av_buffersink_get_frame_rate(ost->filter->filter);
         if (ist && !ost->frame_rate.num)
@@ -4172,7 +4211,7 @@ static int init_output_stream_encode(OutputStream *ost)
                    ost->file_index, ost->index);
         }
 
-        /*若编码器有支持的帧率数组，且没有强制帧率，那么会根据上面存储的帧率，在ffmpeg的帧率数组中找到一个最近的帧率*/
+        /* 若编码器有支持的帧率数组，且没有强制帧率，那么会根据上面存储的帧率，在ffmpeg的帧率数组中找到一个最近的帧率 */
         if (ost->enc->supported_framerates && !ost->force_fps) {
             int idx = av_find_nearest_q_idx(ost->frame_rate, ost->enc->supported_framerates);
             ost->frame_rate = ost->enc->supported_framerates[idx];
@@ -4186,7 +4225,7 @@ static int init_output_stream_encode(OutputStream *ost)
         }
     }
 
-    /*5.设置不同媒体类型的编码器中的相关参数*/
+    /* 5.设置不同媒体类型的编码器中的相关参数 */
     switch (enc_ctx->codec_type) {
     case AVMEDIA_TYPE_AUDIO:
         /*通过过滤器获取音频相关参数*/
@@ -4222,7 +4261,7 @@ static int init_output_stream_encode(OutputStream *ost)
                                        "Please consider specifying a lower framerate, a different muxer or -vsync 2\n");
         }
 
-        /*将forced_kf_pts由单位AV_TIME_BASE_Q转成enc_ctx->time_base的时基单位.暂未深入研究
+        /* 将forced_kf_pts由单位AV_TIME_BASE_Q转成enc_ctx->time_base的时基单位.暂未深入研究
          * av_rescale_q()的原理：假设要转的pts=a，时基1{x1,y1}，时基2{x2,y2};
          * 因为转化前后的比是一样的，设转换后的pts=b，那么有a*x1/y1=b*x2/y2; 化简：
          * b=(a*x1*y2)/(y1*x2).
@@ -4231,8 +4270,7 @@ static int init_output_stream_encode(OutputStream *ost)
          * av_rescale_rnd(a, x1*y2, y1*x2, AV_ROUND_NEAR_INF);
          * 在av_rescale_rnd()内部，正常逻辑走：return (a * b + r) / c;
          * 那么去掉加上r，就验证了我们上面的原理.
-         * av_rescale_q() see https://blog.csdn.net/weixin_44517656/article/details/110559611
-        */
+         * av_rescale_q() see https://blog.csdn.net/weixin_44517656/article/details/110559611 */
         for (j = 0; j < ost->forced_kf_count; j++)
             ost->forced_kf_pts[j] = av_rescale_q(ost->forced_kf_pts[j],
                                                  AV_TIME_BASE_Q,
@@ -4333,7 +4371,7 @@ static int init_output_stream_encode(OutputStream *ost)
         break;
     }
 
-    /*6.以编码器上下文的时基作为复用的时基*/
+    /* 6.以编码器上下文的时基作为复用的时基 */
     ost->mux_timebase = enc_ctx->time_base;
 
     return 0;
@@ -4465,13 +4503,13 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
 {
     int ret = 0;
 
-    /*1.输出流需要编码的流程*/
+    /* 1.输出流需要编码的流程 */
     if (ost->encoding_needed) {
         AVCodec      *codec = ost->enc;//在new_xxx_stream()时初始化了
         AVCodecContext *dec = NULL;
         InputStream *ist;
 
-        /*1.1给输出流结构体OutputStream相关成员赋值*/
+        /* 1.1给输出流结构体OutputStream相关成员赋值 */
         ret = init_output_stream_encode(ost);
         if (ret < 0)
             return ret;
@@ -4776,6 +4814,12 @@ static void report_new_stream(int input_index, AVPacket *pkt)
     file->nb_streams_warn = pkt->stream_index + 1;
 }
 
+/**
+ * @brief 打开输入流的解码器, 输出流满足一定条件也会打开编码器,
+ *          但音视频一般不会在transcode_init打开.
+ *
+ * @return 0-成功 负数-失败
+ */
 static int transcode_init(void)
 {
     int ret = 0, i, j, k;
@@ -4784,7 +4828,7 @@ static int transcode_init(void)
     InputStream *ist;
     char error[1024] = {0};
 
-    /*1.暂时没看懂,推流命令没用到*/
+    /* 1.暂时没看懂,推流命令没用到 */
     for (i = 0; i < nb_filtergraphs; i++) {
         FilterGraph *fg = filtergraphs[i];
         for (j = 0; j < fg->nb_outputs; j++) {
@@ -4801,7 +4845,7 @@ static int transcode_init(void)
     }
 
     /* init framerate emulation(init帧速率仿真) */
-    /*2.用户指定-re选项，则给每个输入文件的每个输入流保存一个开始时间*/
+    /* 2.用户指定-re选项，则给每个输入文件的每个输入流保存一个开始时间 */
     for (i = 0; i < nb_input_files; i++) {
         InputFile *ifile = input_files[i];
         if (ifile->rate_emu){
@@ -4813,36 +4857,38 @@ static int transcode_init(void)
     }
 
     /* init input streams */
-    /*3.进一步初始化输入流(add_input_streams初始化了一部分).
-    内部会对硬件相关处理，以及调用avcodec_open2()*/
+    /* 3.进一步初始化输入流(add_input_streams初始化了一部分),内部会对硬件相关处理.
+     * 转码时实际上主要是打开解码器(avcodec_open2()),不转码则只处理一些参数 */
     for (i = 0; i < nb_input_streams; i++)
         if ((ret = init_input_stream(i, error, sizeof(error))) < 0) {
-            /*只要有一个输入流初始化失败，则将所有输出流编解码器上下文全部关闭*/
+            /* 只要有一个输入流初始化失败，则将所有输出流编解码器上下文全部关闭 */
             for (i = 0; i < nb_output_streams; i++) {
                 ost = output_streams[i];
-                /*这个函数不会释放enc_ctx本身，需要avcodec_free_context()去做.
+                /* 这个函数释放enc_ctx内部相关内容, 但不会释放enc_ctx本身，需要avcodec_free_context()去做.
                  * 参考ffmpeg/tests/api/api-h264-test.c/video_decode_example(),
-                 实际上ffmpeg注释也说了，avcodec_alloc_context3()开辟的上下文应该使用avcodec_free_context()释放*/
+                 * 实际上ffmpeg注释也说了，avcodec_alloc_context3()开辟的上下文应该使用avcodec_free_context()释放 */
                 avcodec_close(ost->enc_ctx);
             }
             goto dump_format;
         }
 
     /* open each encoder */
+    /* 4.进一步初始化输出流(new_video(audio,subtitle,data)_stream初始化了一部分),内部会对硬件相关处理.
+     * 转码时实际上主要是打开编码器(avcodec_open2()),不转码则只处理一些参数. */
     for (i = 0; i < nb_output_streams; i++) {
         // skip streams fed from filtergraphs until we have a frame for them(跳过过滤器的数据流，直到我们找到合适的帧)
-        /*因为我们在open_output_files()给需要转码的流创建了filter，所以音视频流一般会执行continue*/
+        /* 因为我们在open_output_file()给需要转码的流创建了filter，所以音视频流会执行continue */
         if (output_streams[i]->filter)
             continue;
 
-        /*字幕一般会走这里，因为在open_output_files()创建filter时，字幕不会创建*/
+        /* 字幕一般会走这里，因为在open_output_files()创建filter时，字幕不会创建 */
         ret = init_output_stream(output_streams[i], error, sizeof(error));
         if (ret < 0)
             goto dump_format;
     }
 
     /* discard unused programs */
-    /*暂不研究，推流没用到*/
+    /* 5. 暂不研究，推流没用到 */
     for (i = 0; i < nb_input_files; i++) {
         InputFile *ifile = input_files[i];
         for (j = 0; j < ifile->ctx->nb_programs; j++) {
@@ -4859,8 +4905,8 @@ static int transcode_init(void)
     }
 
     /* write headers for files with no streams */
-    /*写没有流的文件头.输出文件是/dev/null这种的处理？
-     * 暂不研究，推流没用到
+    /* 写没有流的文件头.输出文件是/dev/null这种的处理？
+     * 6. 暂不研究，推流没用到
      */
     for (i = 0; i < nb_output_files; i++) {
         oc = output_files[i]->ctx;
@@ -4871,18 +4917,19 @@ static int transcode_init(void)
         }
     }
 
+    // 下面都是dump打印到控制台的相关内容,可以不看.
  dump_format:
     /* dump the stream mapping */
     /*dump输入输出流的信息，比较简单，可以不看*/
     av_log(NULL, AV_LOG_INFO, "Stream mapping:\n");
 
-    /*遍历每个输入流的每个输入过滤器的graph_desc是否为空，不为空则打印相关信息；为空则不打印*/
+    /* 7. 遍历每个输入流的每个输入过滤器的graph_desc是否为空，不为空则打印相关信息；为空则不打印. */
     for (i = 0; i < nb_input_streams; i++) {
         ist = input_streams[i];
 
         //遍历输入流的每个输入过滤器
         for (j = 0; j < ist->nb_filters; j++) {
-            if (!filtergraph_is_simple(ist->filters[j]->graph)) {//graph_desc为空不打印，不为空则打印
+            if (!filtergraph_is_simple(ist->filters[j]->graph)) {//推流命令不会进来
                 av_log(NULL, AV_LOG_INFO, "  Stream #%d:%d (%s) -> %s",
                        ist->file_index, ist->st->index, ist->dec ? ist->dec->name : "?",
                        ist->filters[j]->name);
@@ -4893,7 +4940,7 @@ static int transcode_init(void)
         }
     }
 
-    /*遍历输出流*/
+    /* 8. 遍历输出流 */
     for (i = 0; i < nb_output_streams; i++) {
         ost = output_streams[i];
 
@@ -4905,7 +4952,7 @@ static int transcode_init(void)
             continue;
         }
 
-        /*判断输出流的输出过滤器的graph_desc是否为空，
+        /* 判断输出流的输出过滤器的graph_desc是否为空，
          * 不为空则打印，然后continue；为空则不打印.
          * 这里一般是用到过滤器的处理.*/
         if (ost->filter && !filtergraph_is_simple(ost->filter->graph)) {
@@ -4919,7 +4966,7 @@ static int transcode_init(void)
             continue;
         }
 
-        /*下面是正常流程*/
+        /* 下面是正常流程 */
         av_log(NULL, AV_LOG_INFO, "  Stream #%d:%d -> #%d:%d",
                input_streams[ost->source_index]->file_index,
                input_streams[ost->source_index]->st->index,
@@ -4973,7 +5020,7 @@ static int transcode_init(void)
         return ret;
     }
 
-    /*标记transcode_init()完成.
+    /* 9. 标记transcode_init()完成.
      atomic_store是一个原子操作，理解成C++的std::atomic<>模板即可*/
     atomic_store(&transcode_init_done, 1);
 
@@ -4989,18 +5036,18 @@ static int need_output(void)
     int i;
 
     /*1.遍历所有输出流：
-     * 1）若某个流已经完成 或者 该流大于等于用户指定的输出文件大小限制，那么不处理该流；
-     * 2）否则，则去判断 该输出流的帧数 是否大于等于 用户指定的最大帧数，若大于等于，则会把 包含该输出流的文件的所有流 都标记为完成.*/
+     * 1）若某个流已经完成 或者 该流>=用户指定的输出文件大小限制，那么不处理该流；
+     * 2）否则，则去判断 该输出流的帧数 是否>= 用户指定的最大帧数，若>=，则会把 包含该输出流的文件的所有流 都标记为完成.*/
     for (i = 0; i < nb_output_streams; i++) {
         OutputStream *ost    = output_streams[i];
         OutputFile *of       = output_files[ost->file_index];
         AVFormatContext *os  = output_files[ost->file_index]->ctx;
 
-        if (ost->finished ||    /*该流已经完成？*/
-            (os->pb && avio_tell(os->pb) >= of->limit_filesize))/*当前输出io的字节大小 大于等于 用户指定的输出文件大小限制*/
+        if (ost->finished ||    /* 该输出流已经完成 */
+            (os->pb && avio_tell(os->pb) >= of->limit_filesize))/* 当前输出io的字节大小 >= 用户指定的输出文件大小限制 */
             continue;
 
-        if (ost->frame_number >= ost->max_frames) {//该输出流的帧数 大于等于 用户指定的最大帧数
+        if (ost->frame_number >= ost->max_frames) {//该输出流的帧数 >= 用户指定的最大帧数
             int j;
             for (j = 0; j < of->ctx->nb_streams; j++)
                 close_output_stream(output_streams[of->ost_index + j]);
@@ -5029,25 +5076,25 @@ static int need_output(void)
 static OutputStream *choose_output(void)
 {
     int i;
-    int64_t opts_min = INT64_MAX;//记录所有输出流中dts最小的值，首次赋为最大值，是为了满足第一次if条件
-    OutputStream *ost_min = NULL;//对应dts为最小时的流
+    int64_t opts_min = INT64_MAX;// 记录所有输出流中dts最小的值，首次会设为最大值，是为了满足第一次if条件
+    OutputStream *ost_min = NULL;// 对应dts为最小时的流
 
     for (i = 0; i < nb_output_streams; i++) {
         OutputStream *ost = output_streams[i];
         int64_t opts = ost->st->cur_dts == AV_NOPTS_VALUE ? INT64_MIN :
                        av_rescale_q(ost->st->cur_dts, ost->st->time_base,
-                                    AV_TIME_BASE_Q);//为空则设为INT64_MIN，否则将其转成微秒单位
+                                    AV_TIME_BASE_Q);// 为空则设为INT64_MIN，否则将其转成微秒单位
+
         if (ost->st->cur_dts == AV_NOPTS_VALUE)
             av_log(NULL, AV_LOG_DEBUG,
                 "cur_dts is invalid st:%d (%d) [init:%d i_done:%d finish:%d] (this is harmless if it occurs once at the start per stream)\n",
-                ost->st->index, ost->st->id, ost->initialized, ost->inputs_done, ost->finished);
-        //(如果在每个流开始时只发生一次，那么这是无害的)
+                ost->st->index, ost->st->id, ost->initialized, ost->inputs_done, ost->finished);//(如果在每个流开始时只发生一次，那么这是无害的)
 
-        //1.若输出流没有初始化 且 输入没完成，那么优先返回该输出流
+        // 1.若输出流没有初始化 且 输入没完成，那么优先返回该输出流
         if (!ost->initialized && !ost->inputs_done)
             return ost;
 
-        /*2.依赖输出流的st->cur_dts(opts)去选，遍历所有输出流，每次只
+        /* 2.依赖输出流的st->cur_dts(opts)去选，遍历所有输出流，每次只
          * 选ost->st->cur_dts值最小的输出流进行返回*/
         if (!ost->finished && opts < opts_min) {
             opts_min = opts;
@@ -5359,14 +5406,16 @@ static int get_input_packet_mt(InputFile *f, AVPacket *pkt)
 static int get_input_packet(InputFile *f, AVPacket *pkt)
 {
     // 1. 判断是否指定-re选项稳定读取pkt.
-    //实现稳定读取的思路很简单,就是对比输入流dts与输入流实际已经读取的时间的大小.
+    // 实现稳定读取的思路很简单,就是对比当前读输入流当前的dts与该输入流转码经过的时间的大小.
     if (f->rate_emu) {
         int i;
         for (i = 0; i < f->nb_streams; i++) {
             InputStream *ist = input_streams[f->ist_index + i];
-            int64_t pts = av_rescale(ist->dts, 1000000, AV_TIME_BASE);//很简单,就是:dts*1000000/1000000.内部会进行四舍五入的操作
-            int64_t now = av_gettime_relative() - ist->start;//该输入流实际已经读取的时间
-            //输入流的编码速度比实际时间差还要大,说明太快了,需要暂停一下,那么返回EAGAIN.
+            // 很简单,就是:dts*1000000/1000000.内部会进行四舍五入的操作
+            int64_t pts = av_rescale(ist->dts, 1000000, AV_TIME_BASE);
+            // 该输入流转码经过的时间
+            int64_t now = av_gettime_relative() - ist->start;
+            // 输入流的读取速度比实际时间差还要大,说明太快了,需要暂停一下,那么返回EAGAIN.
             if (pts > now)
                 return AVERROR(EAGAIN);
         }
@@ -5653,7 +5702,7 @@ static int process_input(int file_index)
 
     ist = input_streams[ifile->ist_index + pkt.stream_index];// 根据pkt保存的流下标 获取 对应输入流
 
-    ist->data_size += pkt.size;//统计该输入流已经读取的包大小和数目
+    ist->data_size += pkt.size;// 统计该输入流已经读取的包大小和数目
     ist->nb_packets++;
 
     // 4. =1,该流读到的包都会被丢弃
@@ -5848,7 +5897,7 @@ static int process_input(int file_index)
     // 略,内部一般会因ist2->sub2video.frame为空返回.
     sub2video_heartbeat(ist, pkt.pts);
 
-    // 正常处理pkt的流程
+    // 正常处理pkt的流程.可以看到正常处理是不关心返回值
     process_input_packet(ist, &pkt, 0);
 
 discard_packet:
@@ -5882,6 +5931,23 @@ static int transcode_from_filter(FilterGraph *graph, InputStream **best_ist)
 
     *best_ist = NULL;
 
+//    {
+//        // 从ffmpeg源码提取的avfilter_graph_request_oldest的部分代码,
+//        // 用于测试avfilter_graph_request_oldest的作用.不测试时必须注释掉.
+//        int r = -1;
+//        AVFilterLink *oldest = graph->graph->sink_links[0];
+//        oldest = graph->graph->sink_links[0];
+//        if (oldest->dst->filter->activate) {
+//            /* For now, buffersink is the only filter implementing activate. */
+//            r = av_buffersink_get_frame_flags(oldest->dst, NULL,
+//                                              AV_BUFFERSINK_FLAG_PEEK);
+//            if (r != AVERROR_EOF)
+//                return r;
+//        } else {
+//            //r = ff_request_frame(oldest);
+//        }
+//    }
+
     /*
      * avfilter_graph_request_oldest(): 在最老的sink link中请求帧。
      * 如果请求返回AVERROR_EOF，则尝试下一个。
@@ -5890,18 +5956,18 @@ static int transcode_from_filter(FilterGraph *graph, InputStream **best_ist)
      * 当有多个sink links时，如果请求的link返回一个EOF，这可能会导致过滤器刷新发送到另一个sink link的挂起的帧，尽管这些帧没有被请求。
      * @return ff_request_frame()的返回值，或者如果所有的links都返回AVERROR_EOF，则返回AVERROR_EOF。
      * ff_request_frame()的返回值：
-     * 0： 成功；
+     * >=0： 成功；
      * AVERROR_EOF：文件结尾；
      * AVERROR(EAGAIN)：如果之前的过滤器当前不能输出一帧，也不能保证EOF已经到达。
     */
-    /* 1.获取graph有多少frame 可以从buffersink读取. */
+    /* 1.获取graph有多少frame 可以从buffersink读取.正常都是返回eagain(-11) */
     ret = avfilter_graph_request_oldest(graph->graph);
     if (ret >= 0)
         return reap_filters(0);
 
     if (ret == AVERROR_EOF) {
         ret = reap_filters(1);
-        //为每个输出流标记编码结束
+        // 为每个输出流标记编码结束
         for (i = 0; i < graph->nb_outputs; i++)
             close_output_stream(graph->outputs[i]->ost);
         return ret;
@@ -5909,18 +5975,21 @@ static int transcode_from_filter(FilterGraph *graph, InputStream **best_ist)
     if (ret != AVERROR(EAGAIN))
         return ret;
 
-    //处理EAGAIN的情况
+    // 处理EAGAIN的情况
     /* 2. 判断输入文件是否处理完成. */
     for (i = 0; i < graph->nb_inputs; i++) {
         ifilter = graph->inputs[i];
-        //2.1 输入文件遇到eagain或者eof(上面的是输出流的EAGAIN,eof处理),执行continue
+        // 2.1 输入文件遇到eagain或者eof(上面的是输出流的EAGAIN,eof处理),执行continue
         ist = ifilter->ist;
         if (input_files[ist->file_index]->eagain ||
             input_files[ist->file_index]->eof_reached)
             continue;
-        /*av_buffersrc_get_nb_failed_requests(): 获取失败请求的数量。当调用request_frame方法而缓冲区中没有帧时，
-         * 请求失败。当添加一个帧时，该数字被重置*/
-        //2.2 记录遇到失败次数最多的输入流.
+
+        /* av_buffersrc_get_nb_failed_requests():
+         * 获取失败请求的数量。当调用request_frame方法而缓冲区中没有帧时，请求失败。
+         * 当添加一个帧时，该数字被重置*/
+        // 2.2 记录遇到失败次数最多的输入流.
+        // 注意是从输入filter请求.
         nb_requests = av_buffersrc_get_nb_failed_requests(ifilter->filter);
         if (nb_requests > nb_requests_max) {
             nb_requests_max = nb_requests;
@@ -5928,7 +5997,7 @@ static int transcode_from_filter(FilterGraph *graph, InputStream **best_ist)
         }
     }
 
-    // 3. 找不到best_ist,说明输入文件遇到eagain或者eof,或者没有失败次数.那么会认为输入文件处理完成,标记对应的输出流为不可用?
+    // 3. 找不到best_ist,说明输入文件遇到eagain或者eof,或者没有失败次数.那么会标记对应的输出流为不可用
     if (!*best_ist)
         for (i = 0; i < graph->nb_outputs; i++)
             graph->outputs[i]->ost->unavailable = 1;
@@ -5951,14 +6020,14 @@ static int transcode_step(void)
     /* 1. 选择一个输出流 */
     ost = choose_output();
     if (!ost) {
-        //暂时不清楚拿到不可用的流这样处理的意义
+        // 1.1 若拿到不可用的流时,且output_streams[i]->unavailable=1,会清空unavailable=0,然后返回.相当于再尝试获取输出流
         if (got_eagain()) {
             reset_eagain();
             av_usleep(10000);
             return 0;
         }
 
-        //没有更多的输入来读取，完成
+        // 1.2 没有更多的输入来读取，完成
         av_log(NULL, AV_LOG_VERBOSE, "No more inputs to read from, finishing.\n");
         return AVERROR_EOF;
     }
@@ -5974,10 +6043,10 @@ static int transcode_step(void)
         }
     }
 
-    /* 3. 选择一个输入流. */
-    //3.1 ost->filter 和 ost->filter->graph->graph都已经初始化的选择流程.
+    /* 3. (基于输出流)选择一个输入流. */
+    // 3.1 ost->filter 和 ost->filter->graph->graph都已经初始化的选择流程.
     if (ost->filter && ost->filter->graph->graph) {
-        /*3.1.1 对还没调用init_output_stream()初始化的流，则调用。
+        /* 3.1.1 对还没调用init_output_stream()初始化的流，则调用。
          * 注，因为在init_simple_filtergraph()是没有对
          * FilterGraph(即fg变量)里面的AVFilterGraph *graph赋值的，
          * 而ost->filter=fg->outputs[0]()即指向OutputFilter，
@@ -5996,21 +6065,21 @@ static int transcode_step(void)
         }
         if ((ret = transcode_from_filter(ost->filter->graph, &ist)) < 0)
             return ret;
-        if (!ist)//这里看到,transcode_from_filter找不到best_ist且成功,会认为转码结束
+        if (!ist)// 这里看到,transcode_from_filter找不到best_ist且成功,会直接返回0
             return 0;
     } else if (ost->filter) {
-        //3.2 只有ost->filter被初始化的选择流程. 推流时,ost->filter对应fg->outputs[0](see init_simple_filtergraph())
-        //3.2.1 遍历 该输出流 对应的输入流的输入过滤器个数, 通过输入过滤器获取对应的输入流,判断是否可以作为输入
-        //正常输入流与输入过滤器个数都是1比1的(see init_simple_filtergraph()).
+        // 3.2 只有ost->filter被初始化的选择流程. 推流时,ost->filter对应fg->outputs[0](see init_simple_filtergraph())
+        // 3.2.1 遍历 该输出流 对应的输入流的输入过滤器个数, 通过输入过滤器获取对应的输入流,判断是否可以作为输入
+        // 正常输入流与输入过滤器个数都是1比1的(see init_simple_filtergraph()).
         int i;
         for (i = 0; i < ost->filter->graph->nb_inputs; i++) {
             InputFilter *ifilter = ost->filter->graph->inputs[i];
-            if (!ifilter->ist->got_output && !input_files[ifilter->ist->file_index]->eof_reached) {//优先选择输入流还没输出过的? 且 输入文件还没到达eof
+            if (!ifilter->ist->got_output && !input_files[ifilter->ist->file_index]->eof_reached) {//优先选择输入流还没解码成功过的 且 输入文件还没到达eof
                 ist = ifilter->ist;
                 break;
             }
         }
-        //3.2.2 没有找到输入流,认为处理所有输入流完成,标记inputs_done=1,函数返回.
+        // 3.2.2 没有找到输入流,认为处理所有输入流完成,标记inputs_done=1,函数返回.
         if (!ist) {
             ost->inputs_done = 1;
             return 0;
@@ -6033,12 +6102,14 @@ static int transcode_step(void)
         return ret == AVERROR_EOF ? 0 : ret;
 
     // 5. 从过滤器中读取一帧,并进行编码写帧.
+    // 如果没有任何一个输入流被成功解码,会直接返回0.
     return reap_filters(0);
 }
 
-/*
- * The following code is the main loop of the file converter
+/**
+ * @brief The following code is the main loop of the file converter
  * (下面的代码是文件转换器的主循环)
+ * @return 成功-0 失败-负数或者程序直接退出
  */
 static int transcode(void)
 {
@@ -6049,7 +6120,7 @@ static int transcode(void)
     int64_t timer_start;
     int64_t total_packets_written = 0;
 
-    /*1.转码前的初始化*/
+    /* 1.转码前的初始化 */
     ret = transcode_init();
     if (ret < 0)
         goto fail;
@@ -6061,11 +6132,12 @@ static int transcode(void)
     timer_start = av_gettime_relative();
 
 #if HAVE_THREADS
-    /*2.存在多个输入文件时，给每个输入文件对应的开辟一个线程.*/
+    /* 2.存在多个输入文件时，给每个输入文件对应的开辟一个线程. */
     if ((ret = init_input_threads()) < 0)
         goto fail;
 #endif
 
+    // 3. 循环转码
     while (!received_sigterm) {
         int64_t cur_time= av_gettime_relative();
 
@@ -6090,12 +6162,12 @@ static int transcode(void)
         print_report(0, timer_start, cur_time);
     }//<== while (!received_sigterm) end ==>
 
-    // 多输入文件时.回收所有输入文件线程.
+    // 4. 多输入文件时.回收所有输入文件线程.
 #if HAVE_THREADS
     free_input_threads();
 #endif
 
-    // 确认所有输入流的解码器 已经使用空包刷新缓冲区.一般在process_input()里面完成刷空包.
+    // 5. 确认所有输入流的解码器已经使用空包刷新缓冲区.一般在process_input()里面完成刷空包.
     /* at the end of stream, we must flush the decoder buffers(在流结束时,必须刷新解码器缓冲区) */
     for (i = 0; i < nb_input_streams; i++) {
         ist = input_streams[i];
@@ -6103,11 +6175,14 @@ static int transcode(void)
             process_input_packet(ist, NULL, 0);
         }
     }
+
+    // 6. 清空编码器
     flush_encoders();
 
     term_exit();
 
     /* write the trailer if needed and close file */
+    // 7. 为每个输出文件调用av_write_trailer().
     for (i = 0; i < nb_output_files; i++) {
         os = output_files[i]->ctx;
         if (!output_files[i]->header_written) {
@@ -6115,7 +6190,7 @@ static int transcode(void)
                    "Nothing was written into output file %d (%s), because "
                    "at least one of its streams received no packets.\n",
                    i, os->url);
-            continue;
+            continue;// 没写头的文件不写尾
         }
         if ((ret = av_write_trailer(os)) < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error writing trailer of %s: %s\n", os->url, av_err2str(ret));
@@ -6127,6 +6202,7 @@ static int transcode(void)
     /* dump report by using the first video and audio streams */
     print_report(1, timer_start, av_gettime_relative());
 
+    // 8. 关闭编码器
     /* close each encoder */
     for (i = 0; i < nb_output_streams; i++) {
         ost = output_streams[i];
@@ -6142,6 +6218,7 @@ static int transcode(void)
         exit_program(1);
     }
 
+    // 9. 关闭解码器
     /* close each decoder */
     for (i = 0; i < nb_input_streams; i++) {
         ist = input_streams[i];
@@ -6152,6 +6229,7 @@ static int transcode(void)
         }
     }
 
+    // 10. 释放硬件相关
     av_buffer_unref(&hw_device_ctx);
     hw_device_free_all();
 
@@ -6415,6 +6493,7 @@ int main(int argc, char **argv)
     if ((decode_error_stat[0] + decode_error_stat[1]) * max_error_rate < decode_error_stat[1])
         exit_program(69);
 
+    // 调用ffmpeg_cleanup. 因为上面注册回调是使用ffmpeg_cleanup注册的.
     exit_program(received_nb_signals ? 255 : main_return_code);
     return main_return_code;
 }

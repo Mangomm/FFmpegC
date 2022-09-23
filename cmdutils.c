@@ -128,7 +128,7 @@ void init_dynload(void)
 #endif
 }
 
-static void (*program_exit)(int ret);
+static void (*program_exit)(int ret);// 静态指针函数变量.ffmpeg这里注册程序退出函数是: ffmpeg_cleanup()
 
 void register_exit(void (*cb)(int ret))
 {
@@ -137,9 +137,11 @@ void register_exit(void (*cb)(int ret))
 
 void exit_program(int ret)
 {
+    // 1. 回收相关内容
     if (program_exit)
         program_exit(ret);
 
+    // 2. 退出进程
     exit(ret);
 }
 

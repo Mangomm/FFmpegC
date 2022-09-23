@@ -309,7 +309,8 @@ typedef struct FilterGraph {
 typedef struct InputStream {
     int file_index;             // 输入文件的下标.例如-i 1.mp4 -i 2.mp4,两个输入文件下标依次是0,1
     AVStream *st;
-    int discard;                /* true if stream data should be discarded *///=1,该流读到的包都会被丢弃
+    int discard;                /* true if stream data should be discarded */
+                                // =1,该流读到的包都会被丢弃。输入流有效时,在new_output_stream()初始化为0
     int user_set_discard;
     int decoding_needed;        /* non zero if the packets must be decoded in 'raw_fifo', see DECODING_FOR_* */
                                 // 非0表示输入流需要进行转码操作
@@ -321,7 +322,7 @@ typedef struct InputStream {
     AVFrame *decoded_frame;     // 存放解码后的一帧.视频在decode_video()开辟,音频在decode_audio()
     AVFrame *filter_frame; /* a ref of decoded_frame, to be sent to filters */ ///与decoded_frame类似
 
-    int64_t       start;     /* time when read started *///单位微秒
+    int64_t       start;     /* time when read started */ // 指定-re选项时,在transcode_init会保存转码的开始时间,单位微秒
     /* predicted dts of the next packet read for this stream or (when there are
      * several frames in a packet) of the next frame in current packet (in AV_TIME_BASE units) */
     int64_t       next_dts;  ///单位微秒
@@ -377,7 +378,7 @@ typedef struct InputStream {
                                                 // 因为输出流的filters是一级指针，而这里输入流是二级指针
     int        nb_filters;                      // filters数组元素个数
 
-    int reinit_filters;                         // -reinit_filter选项,输入流参数改变是否重新初始化filtergraph,
+    int reinit_filters;                         // -reinit_filter选项,ifilter参数改变是否重新初始化filtergraph,
                                                 // =0时参数改变不会重新初始化,非0时会.默认值为-1,所以默认会重新初始化
 
     /* hwaccel options */
@@ -549,7 +550,9 @@ typedef struct OutputStream {
     AVDictionary *resample_opts;        // 重采样选项.
     char *apad;
     OSTFinished finished;               /* no more packets should be written for this stream(输出流完成，则不应该再为该流写入任何信息包) */
-    int unavailable;                    /* true if the steram is unavailable (possibly temporarily) *///流是否可用,循环时开始会重置它为0
+    int unavailable;                    /* true if the steram is unavailable (possibly temporarily) */
+                                        // 流是否可用,0-可用,1-不可用,循环时开始会重置它为0
+
     int stream_copy;                    // 是否不转码输出，例如-vcodec copy选项.0=转码 1=不转码.只要置为0，音视频都会进入转码的流程。see choose_encoder()
 
     // init_output_stream() has been called for this stream
@@ -557,7 +560,7 @@ typedef struct OutputStream {
     // parameters are set in the AVStream.
     int initialized;                    // =1表示init_output_stream()调用完成.see init_output_stream()
 
-    int inputs_done;                    // =1表示输入流全部处理完成,see transcode_step()
+    int inputs_done;                    // =1表示输入流全部处理完成,主要用于选择输入流进行解码,see transcode_step()
 
     const char *attachment_filename;
     int copy_initial_nonkeyframes;      // 对应OptionsContext.copy_initial_nonkeyframes.复制最初的非关键帧
@@ -601,7 +604,7 @@ typedef struct OutputFile {
     int64_t start_time;      ///< start time in microseconds == AV_TIME_BASE units
     uint64_t limit_filesize; /* filesize limit expressed in bytes(文件大小限制，以字节为单位),-fs选项.*/
 
-    int shortest;           // -shortest选项得到的值
+    int shortest;           // -shortest选项得到的值,=1:最短时长的流完成输出时,其它流也要关闭.
 
     int header_written;     // =1表示调用avformat_write_header()成功.
 } OutputFile;
@@ -623,7 +626,7 @@ extern int         nb_output_files;         // 输出文件个数
 extern FilterGraph **filtergraphs;          // 封装好的系统过滤器数组，每个FilterGraph都会包含对应输入流与输出流的的输入输出过滤器。可看init_simple_filtergraph函数
 extern int        nb_filtergraphs;          // filtergraphs数组的大小
 
-extern char *vstats_filename;
+extern char *vstats_filename;               //  由-vstats_file选项管理,设置后可以将视频流的相关信息保存到文件
 extern char *sdp_filename;
 
 extern float audio_drift_threshold;         // -adrift_threshold选项,默认0.1
@@ -655,7 +658,7 @@ extern char *videotoolbox_pixfmt;
 
 extern int filter_nbthreads;                // -filter_threads选项,默认0,非复杂过滤器线程数.
 extern int filter_complex_nbthreads;        // -filter_complex_threads选项,默认0,复杂过滤器线程数.
-extern int vstats_version;
+extern int vstats_version;                  // -vstats_version选项, 默认2, 要使用的vstats格式的版本
 
 extern const AVIOInterruptCB int_cb;
 

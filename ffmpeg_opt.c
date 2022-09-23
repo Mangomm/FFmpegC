@@ -116,7 +116,7 @@ int frame_bits_per_raw_sample = 0;
 float max_error_rate  = 2.0/3;
 int filter_nbthreads = 0;               // -filter_threads选项,默认0,非复杂过滤器线程数.
 int filter_complex_nbthreads = 0;       // -filter_complex_threads选项,默认0,复杂过滤器线程数.
-int vstats_version = 2;
+int vstats_version = 2;                 // -vstats_version选项, 默认2, 要使用的vstats格式的版本
 
 
 static int intra_only         = 0;
@@ -842,7 +842,7 @@ static void  add_input_streams(OptionsContext *o, AVFormatContext *ic)
         MATCH_PER_STREAM_OPT(discard, str, discard_str, ic, st);
         ist->user_set_discard = AVDISCARD_NONE;/*默认该流是不丢弃的*/
 
-        // 5. 判断是否丢弃该流.
+        // 5. 判断是否丢弃该流.-vn,-an,-sn这些选项.
         // 只要有视频或者音频或者字幕或者数据被禁用，那么user_set_discard标记为AVDISCARD_ALL
         if ((o->video_disable && ist->st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) ||
             (o->audio_disable && ist->st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ||
@@ -3024,7 +3024,7 @@ loop_end:
             }
         }
 
-        /*10.5 当上面需要初始化过滤器后，这里会利用编码器的参数设置过滤器的输出条件。
+        /* 10.5 当上面需要初始化过滤器后，这里会利用编码器的参数设置过滤器的输出条件。
          * 主要是：视频的帧率、分辨率、帧格式；音频的采样格式、采样率、通道布局*/
         /* set the filter output constraints */
         if (ost->filter) {
@@ -3526,6 +3526,9 @@ static int opt_target(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
+/**
+ * @brief -vstats_file选项,设置后可以将视频流的相关信息保存到文件
+ */
 static int opt_vstats_file(void *optctx, const char *opt, const char *arg)
 {
     av_free (vstats_filename);
@@ -3533,6 +3536,9 @@ static int opt_vstats_file(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
+/**
+ * @brief -vstats选项,和上面-vstats_file选项的区别是,本选项自动设置文件名.
+ */
 static int opt_vstats(void *optctx, const char *opt, const char *arg)
 {
     char filename[40];
