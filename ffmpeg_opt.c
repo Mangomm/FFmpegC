@@ -1926,20 +1926,20 @@ static char *get_ost_filters(OptionsContext *o, AVFormatContext *oc,
 {
     AVStream *st = ost->st;
 
-    /*1.同时设置-filter and -filter_scrip会报错，程序退出*/
+    /* 1.同时设置-filter and -filter_scrip会报错，程序退出 */
     if (ost->filters_script && ost->filters) {
         av_log(NULL, AV_LOG_ERROR, "Both -filter and -filter_script set for "
                "output stream #%d:%d.\n", nb_output_files, st->index);
         exit_program(1);
     }
 
-    /*2.若过滤器描述是使用脚本，则读取里面的内容进行返回*/
+    /* 2.若过滤器描述是使用脚本，则读取里面的内容进行返回 */
     if (ost->filters_script)
         return read_file(ost->filters_script);
-    else if (ost->filters)/*3若过滤器描述是使用字符串直接描述，则开辟内存后直接返回*/
+    else if (ost->filters)/* 3.若过滤器描述是使用字符串直接描述，则开辟内存后直接返回 */
         return av_strdup(ost->filters);
 
-    /*4.若没设置过滤器描述，则返回对应媒体类型的空字符串描述*/
+    /* 4.若没设置过滤器描述，则返回对应媒体类型的空字符串描述 */
     return av_strdup(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ?
                      "null" : "anull");
 }

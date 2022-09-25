@@ -1355,7 +1355,7 @@ int configure_filtergraph(FilterGraph *fg)
     AVFilterInOut *inputs, *outputs, *cur;
     int ret, i, simple = filtergraph_is_simple(fg);// 按例子的推流命令时,simple=1
     const char *graph_desc = simple ? fg->outputs[0]->ost->avfilter :
-                                      fg->graph_desc;//graph_desc一般是"null"或者"anull"
+                                      fg->graph_desc;// graph_desc一般是"null"或者"anull",fg->graph_desc是空
 
     // 1. 先清理上一次的FilterGraph,然后再开辟AVFilterGraph.
     cleanup_filtergraph(fg);
@@ -1658,7 +1658,7 @@ int ist_in_filtergraph(FilterGraph *fg, InputStream *ist)
  * @brief 判断FilterGraph的graph_desc描述是否为空.
  * @param fg ffmpeg封装的系统过滤器
  * @return =1 graph_desc为空；=0 graph_desc不为空
-*/
+ */
 int filtergraph_is_simple(FilterGraph *fg)
 {
     return !fg->graph_desc;
