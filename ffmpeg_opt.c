@@ -103,8 +103,8 @@ int do_benchmark      = 0;
 int do_benchmark_all  = 0;              // -benchmark_all选项，默认0
 int do_hex_dump       = 0;
 int do_pkt_dump       = 0;
-int copy_ts           = 0;
-int start_at_zero     = 0;
+int copy_ts           = 0;              // copy timestamps,默认0
+int start_at_zero     = 0;              // 使用copy_ts时，将输入时间戳移至0开始,默认0
 int copy_tb           = -1;
 int debug_ts          = 0;              // 是否打印相关时间戳.-debug_ts选项
 int exit_on_error     = 0;              // xerror选项,默认是0
@@ -2542,9 +2542,9 @@ static int open_output_file(OptionsContext *o, const char *filename)
         exit_program(1);
     output_files[nb_output_files - 1] = of;
 
-    /*对of赋值*/
+    /* 对of赋值 */
     of->ost_index      = nb_output_streams;         // 保存首个输出流的流下标
-    of->recording_time = o->recording_time;
+    of->recording_time = o->recording_time;         // 输出文件的-t录像时长
     of->start_time     = o->start_time;
     of->limit_filesize = o->limit_filesize;
     of->shortest       = o->shortest;               // -shortest选项
@@ -3036,15 +3036,16 @@ loop_end:
                 f->frame_rate = ost->frame_rate;
                 f->width      = ost->enc_ctx->width;
                 f->height     = ost->enc_ctx->height;
-                /*利用编码器上下文或者编码器，给输出过滤器获取支持的像素格式。
-                 * 若编码器上下文已经有像素格式则直接获取(保存在format变量)，否则从编码器中获取(保存在formats数组)*/
+                /* 利用编码器上下文或者编码器，给输出过滤器获取支持的像素格式。
+                 * 若编码器上下文已经有像素格式则直接获取(保存在format变量)，否则从编码器中获取(保存在formats数组) */
                 if (ost->enc_ctx->pix_fmt != AV_PIX_FMT_NONE) {
                     f->format = ost->enc_ctx->pix_fmt;// 注，这里是变量
                 } else if (ost->enc->pix_fmts) {
                     count = 0;
-                    /*遍历该编码器支持的像素格式，得到支持像素格式数组的大小count*/
-                    /*以推流使用libx264编码器为例：我们在libavcodec/allcodecs.c文件找到，extern AVCodec ff_libx264_encoder编码器对象，
-                    在X264_init_static()中，看到会根据x264的版本，支持不同的像素格式，我这里是x264dll是164版本，所以指向pix_fmts_all，共15个元素(不包含AV_PIX_FMT_NONE)*/
+                    /* 遍历该编码器支持的像素格式，得到支持像素格式数组的大小count */
+                    /* 以推流使用libx264编码器为例：我们在libavcodec/allcodecs.c文件找到，extern AVCodec ff_libx264_encoder编码器对象，
+                     * 在X264_init_static()中，看到会根据x264的版本，支持不同的像素格式，我这里是x264dll是164版本，
+                     * 所以指向pix_fmts_all，共15个元素(不包含AV_PIX_FMT_NONE) */
                     while (ost->enc->pix_fmts[count] != AV_PIX_FMT_NONE)
                         count++;
                     f->formats = av_mallocz_array(count + 1, sizeof(*f->formats));
@@ -3054,7 +3055,7 @@ loop_end:
                 }
                 break;
             case AVMEDIA_TYPE_AUDIO:
-                /*1.获取音频像素格式、采样率、通道布局.获取方法与视频同理*/
+                /* 1.获取音频像素格式、采样率、通道布局.获取方法与视频同理 */
                 if (ost->enc_ctx->sample_fmt != AV_SAMPLE_FMT_NONE) {
                     f->format = ost->enc_ctx->sample_fmt;
                 } else if (ost->enc->sample_fmts) {
@@ -3066,7 +3067,7 @@ loop_end:
                         exit_program(1);
                     memcpy(f->formats, ost->enc->sample_fmts, (count + 1) * sizeof(*f->formats));
                 }
-                /*获取音频的采样率*/
+                /* 获取音频的采样率 */
                 if (ost->enc_ctx->sample_rate) {
                     f->sample_rate = ost->enc_ctx->sample_rate;
                 } else if (ost->enc->supported_samplerates) {
@@ -3079,7 +3080,7 @@ loop_end:
                     memcpy(f->sample_rates, ost->enc->supported_samplerates,
                            (count + 1) * sizeof(*f->sample_rates));
                 }
-                /*获取音频的通道布局*/
+                /* 获取音频的通道布局 */
                 if (ost->enc_ctx->channels) {
                     f->channel_layout = av_get_default_channel_layout(ost->enc_ctx->channels);
                 } else if (ost->enc->channel_layouts) {
@@ -3897,19 +3898,19 @@ static int open_files(OptionGroupList *l, const char *inout,
 {
     int i, ret;
 
-    /*1.经过对命令行的分析将输入文件链表放到了l中，在此逐一对输入文件进行处理*/
-    /*l->nb_groups指输入文件个数*/
+    /* 1.经过对命令行的分析将输入文件链表放到了l中，在此逐一对输入文件进行处理 */
+    /* l->nb_groups指输入文件个数 */
     for (i = 0; i < l->nb_groups; i++) {
         OptionGroup *g = &l->groups[i];// 拿到一个输入文件进行处理.
         OptionsContext o;
 
-        /*2.对OptionsContext 中的变量做默认设置，这个结构体很重要，它和ffmpeg_opt.c中定义的const OptionDef options[]相对应。
+        /* 2.对OptionsContext 中的变量做默认设置，这个结构体很重要，它和ffmpeg_opt.c中定义的const OptionDef options[]相对应。
          * 其中设置的偏移量就是针对这个结构体*/
         init_options(&o);
         o.g = g;
         printf("open_files &o.codec_names: %#X, o.codec_names: %#X\n", &o.codec_names, o.codec_names);
 
-        /*3.将g中存的，从命令行中获取的针对这个输入文件的参数放到o中*/
+        /* 3.将g中存的，从命令行中获取的针对这个输入文件的参数放到o中 */
         ret = parse_optgroup(&o, g);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error parsing options for %s file "

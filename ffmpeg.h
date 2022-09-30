@@ -55,6 +55,9 @@
 
 #define MAX_STREAMS 1024    /* arbitrary sanity check value */
 
+#define TYYCODE_TIMESTAMP   // 用于debug时间戳
+#define mydebug av_log
+
 enum HWAccelID {
     HWACCEL_NONE = 0,
     HWACCEL_AUTO,
@@ -115,7 +118,7 @@ typedef struct OptionsContext {
     int        nb_frame_pix_fmts;
 
     /* input options */
-    int64_t input_ts_offset;                    //offset:136
+    int64_t input_ts_offset;                    //offset:136. -itsoffset选项,设置输入时间戳偏移
     int loop;                                   //循环次数.例如无限次,-stream_loop -1
     int rate_emu;                               //offset:148 -re
     int accurate_seek;                          //-accurate_seek选项,是否开启精确查找,与-ss有关
@@ -147,7 +150,8 @@ typedef struct OptionsContext {
 
     int chapters_input_file;
 
-    int64_t recording_time;
+    int64_t recording_time;     // 对应输入输出文件的-t选项.注意区分输入输出文件.
+                                // 例如输入没设-t,而输出设了10s,输入的recording_time是初始化时的值,而输出的则为10s.实际上这个结构体其它字段都是这样.
     int64_t stop_time;
     uint64_t limit_filesize;    // -fs选项，设置文件大小限制
     float mux_preload;
@@ -298,7 +302,7 @@ typedef struct FilterGraph {
     const char    *graph_desc;                  // 图形描述.为空表示是简单过滤器,不为空则不是. see filtergraph_is_simple()
 
     AVFilterGraph *graph;                       // 系统过滤器
-    int reconfiguration;                        // 标记配置了AVFilterGraph?
+    int reconfiguration;                        // =1标记配置了AVFilterGraph
 
     InputFilter   **inputs;                     // 输入文件过滤器描述，数组
     int          nb_inputs;                     // inputs数组的个数
@@ -331,7 +335,7 @@ typedef struct InputStream {
 
     int64_t       next_pts;  ///< synthetic pts for the next decode frame (in AV_TIME_BASE units)(下一个解码帧的合成PTS)
     int64_t       pts;       ///< current pts of the decoded frame  (in AV_TIME_BASE units)
-    int           wrap_correction_done;     // ?,see process_input()
+    int           wrap_correction_done;     // 启用的流更正开始时间是否完成, =1表示完成, 主要处理ts流, see process_input()
 
     int64_t filter_in_rescale_delta_last;   // 仅音频:统计样本数?debug看到该值一直会以样本数递增,例如0-1024-2048-3072...
 
@@ -426,7 +430,7 @@ typedef struct InputFile {
     AVRational time_base; /* time base of the duration */ // 上面duration字段的时基
     int64_t input_ts_offset;
 
-    int64_t ts_offset;    // ?
+    int64_t ts_offset;    // 时间戳偏移地址. 与input_ts_offset、copy_ts、start_at_zero、-ss选项有关,都没加默认是0,正常是负数.
     int64_t last_ts;      // 上一个ptk的dts
     int64_t start_time;   /* user-specified start time in AV_TIME_BASE or AV_NOPTS_VALUE */
     int seek_timestamp;
@@ -505,7 +509,7 @@ typedef struct OutputStream {
 
     AVCodec *enc;               // 通过choose_encoder得到的编码器
     int64_t max_frames;         // 通过OptionsContext.max_frames得到
-    AVFrame *filtered_frame;    // 在reap_filters时会给其开辟内存
+    AVFrame *filtered_frame;    // 用于存储编码后的帧,在reap_filters时会给其开辟内存
     AVFrame *last_frame;
     int last_dropped;
     int last_nb0_frames[3];
@@ -515,7 +519,7 @@ typedef struct OutputStream {
     /* video only */
     AVRational frame_rate;              // 帧率，由OptionsContext.frame_rates即-r选项得到
     int is_cfr;                         // 当format_video_sync 等于 VSYNC_CFR或者VSYNC_VSCFR时，为1.
-    int force_fps;
+    int force_fps;                      // -force_fps强制帧率选项.设置后不会再自动考虑编码器最好的帧率
     int top_field_first;                // ?
     int rotate_overridden;
     double rotate_override_value;
@@ -550,6 +554,8 @@ typedef struct OutputStream {
     AVDictionary *resample_opts;        // 重采样选项.
     char *apad;
     OSTFinished finished;               /* no more packets should be written for this stream(输出流完成，则不应该再为该流写入任何信息包) */
+                                        // 主要通过close_all_output_streams()/close_output_stream()/finish_output_stream()标记完成
+
     int unavailable;                    /* true if the steram is unavailable (possibly temporarily) */
                                         // 流是否可用,0-可用,1-不可用,循环时开始会重置它为0
 
@@ -567,7 +573,7 @@ typedef struct OutputStream {
     int copy_prior_start;               // 对应OptionsContext.copy_prior_start.在开始时间之前复制或丢弃帧
     char *disposition;                  // 对应OptionsContext.disposition，即-disposition选项
 
-    int keep_pix_fmt;
+    int keep_pix_fmt;                   // 当指定pix_fmt选项 且 *frame_pix_fmt == '+' 时,keep_pix_fmt=1
 
     /* stats */
     // combined size of all the packets written
@@ -639,13 +645,13 @@ extern int video_sync_method;
 extern float frame_drop_threshold;
 extern int do_benchmark;
 extern int do_benchmark_all;                // -benchmark_all选项，默认0
-extern int do_deinterlace;
+extern int do_deinterlace;                  // -deinterlace选项,默认0.
 extern int do_hex_dump;                     // -hex选项,当指定-dump选项dump pkt,也dump payload
 extern int do_pkt_dump;                     // -dump选项,默认0
 extern int copy_ts;                         // -copyts选项，默认0
 extern int start_at_zero;                   // -start_at_zero选项，默认0
 extern int copy_tb;
-extern int debug_ts;
+extern int debug_ts;                        // 是否打印相关时间戳.-debug_ts选项
 extern int exit_on_error;                   // -xerror选项,默认是0
 extern int abort_on_flags;
 extern int print_stats;                     // -stats选项,默认-1,在编码期间打印进度报告.
