@@ -55,7 +55,7 @@
 
 #define MAX_STREAMS 1024    /* arbitrary sanity check value */
 
-#define TYYCODE_TIMESTAMP   // 用于debug时间戳
+#define TYYCODE_TIMESTAMP_DEMUXER   // 用于debug解复用的时间戳
 #define mydebug av_log
 
 enum HWAccelID {
@@ -430,7 +430,8 @@ typedef struct InputFile {
     AVRational time_base; /* time base of the duration */ // 上面duration字段的时基
     int64_t input_ts_offset;
 
-    int64_t ts_offset;    // 时间戳偏移地址. 与input_ts_offset、copy_ts、start_at_zero、-ss选项有关,都没加默认是0,正常是负数.
+    int64_t ts_offset;    // 时间戳偏移地址,目前理解意思为与0相差的偏移地址,所以一般是负数值.
+                          // 与input_ts_offset、copy_ts、start_at_zero、-ss选项有关,都没加默认是0.
     int64_t last_ts;      // 上一个ptk的dts
     int64_t start_time;   /* user-specified start time in AV_TIME_BASE or AV_NOPTS_VALUE */
     int seek_timestamp;

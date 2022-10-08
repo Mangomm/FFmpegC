@@ -92,7 +92,7 @@ char *sdp_filename;
 
 float audio_drift_threshold = 0.1;
 float dts_delta_threshold   = 10;
-float dts_error_threshold   = 3600*30;  //帧能被解码的最大阈值大小？
+float dts_error_threshold   = 3600*30;  // dts错误阈值,默认30小时.帧能被解码的最大阈值大小？
 
 int audio_volume      = 256;            // -vol选项,默认256
 int audio_sync_method = 0;              // 音频同步方法.默认0
@@ -1348,7 +1348,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
         } else
             av_log(NULL, AV_LOG_WARNING, "Cannot use -sseof, duration of %s not known\n", filename);
     }
-    timestamp = (o->start_time == AV_NOPTS_VALUE) ? 0 : o->start_time;
+    timestamp = (o->start_time == AV_NOPTS_VALUE) ? 0 : o->start_time;// -ss选项
     /* add the stream start time */
     if (!o->seek_timestamp && ic->start_time != AV_NOPTS_VALUE)
         timestamp += ic->start_time;

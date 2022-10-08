@@ -3186,7 +3186,7 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
     // 1. 判断是否是第一次进来的时间戳，给InputStream的dts/pts赋值.
     //转码时,ist->dts参考has_b_frames; 不转码时优先参考pkt->pts,pkt->pts不存在则参考has_b_frames
     if (!ist->saw_first_ts) {
-        /*求出has_b_frames缓存大小占用的时间.例如has_b_frames=2,avg_frame_rate={25,1},
+        /* 求出has_b_frames缓存大小占用的时间.例如has_b_frames=2,avg_frame_rate={25,1},
          * 乘以AV_TIME_BASE是转成成微秒,除以帧率这假设是25,2*1000000/25=80,000μs.
          * has_b_frames: ffmpeg的注释是"解码器中帧重排序缓冲区的大小".
         */
@@ -5444,7 +5444,7 @@ static int get_input_packet(InputFile *f, AVPacket *pkt)
             int64_t pts = av_rescale(ist->dts, 1000000, AV_TIME_BASE);
             // 该输入流转码经过的时间
             int64_t now = av_gettime_relative() - ist->start;
-#ifdef TYYCODE_TIMESTAMP
+#ifdef TYYCODE_TIMESTAMP_DEMUXER
             mydebug(NULL, AV_LOG_INFO, "get_input_packet(), ist->dts: %"PRId64", pts(AV_TIME_BASE): %"PRId64", "
                    "ist->start: %"PRId64", now: %"PRId64"\n", ist->dts, pts, ist->start, now);
 #endif
@@ -5522,7 +5522,7 @@ static AVRational duration_max(int64_t tmp, int64_t *duration, AVRational tmp_ti
 }
 
 /**
- * @brief seek到文件开始位置, 并获取该输入文件中时长为最长的流的duration,以及对应的时基.
+ * @brief seek到文件开始位置, 并获取该输入文件的duration,以及对应的时基.
  * @param ifile 输入文件
  * @param is 输入文件上下文
  * @return >=0-成功 负数-失败
@@ -5536,12 +5536,12 @@ static int seek_to_start(InputFile *ifile, AVFormatContext *is)
 
     // 1. 该函数用于移动到指定时间戳的关键帧位置.
     /* 对比ffplay使用的avformat_seek_file(): 该函数是新版本的seek api,
-     * 它用于移动到时间戳最近邻的位置(在min_ts与max_ts范围内),内部会调用av_seek_frame*/
+     * 它用于移动到时间戳最近邻的位置(在min_ts与max_ts范围内),内部会调用av_seek_frame */
     ret = av_seek_frame(is, -1, is->start_time, 0);
     if (ret < 0)
         return ret;
 
-    // 2. 判断seek前 是否存在 音频流解码成功过.
+    // 2. 判断是否有音频流 曾经解码成功过.
     for (i = 0; i < ifile->nb_streams; i++) {
         ist   = input_streams[ifile->ist_index + i];
         avctx = ist->dec_ctx;
@@ -5555,12 +5555,12 @@ static int seek_to_start(InputFile *ifile, AVFormatContext *is)
             has_audio = 1;
     }
 
-    // 3. 获取该输入文件中时长为最长的流的duration,以及对应的时基
+    // 3. 获取该输入文件中的duration,以及对应的时基
     for (i = 0; i < ifile->nb_streams; i++) {
         ist   = input_streams[ifile->ist_index + i];
         avctx = ist->dec_ctx;
 
-        // 3.1 获取一帧的时长,有音频的情况下不会考虑视频.
+        // 3.1 获取一帧的时长,有音频的则使用音频;只有视频则使用视频.
         if (has_audio) {
             if (avctx->codec_type == AVMEDIA_TYPE_AUDIO && ist->nb_samples) {
                 // 音频以采样点数/采样率作为时长
@@ -5568,7 +5568,7 @@ static int seek_to_start(InputFile *ifile, AVFormatContext *is)
 
                 duration = av_rescale_q(ist->nb_samples, sample_rate, ist->st->time_base);
             } else {
-                continue;//不是音频流则跳过,因为上面has_audio=1,所以当有音频流时,非音频流都会走这里
+                continue;// 不是音频流则跳过,因为上面has_audio=1,所以当有音频流时,非音频流都会走这里
             }
         } else {
             // 视频以 1/帧率 作为时长
@@ -5582,6 +5582,10 @@ static int seek_to_start(InputFile *ifile, AVFormatContext *is)
             }
         }
 
+        // 下面的逻辑当存在音频流时,是以音频流的时长作为ifile的时长;
+        // 只有视频流时,才会以视频流的时长作为ifile的时长;
+        // 并且,当-stream_loop循环时,每次取该流的最长时长保存在ifile->duration
+
         // 为空先保存ifile->duration的时基
         if (!ifile->duration)
             ifile->time_base = ist->st->time_base;
@@ -5594,9 +5598,10 @@ static int seek_to_start(InputFile *ifile, AVFormatContext *is)
         // INT64_MAX - duration中的duration是一帧的时长,那么INT64_MAX - duration就是代表ist->max_pts - (uint64_t)ist->min_pts的最大值,
         // 所以ist->max_pts - (uint64_t)ist->min_pts < INT64_MAX - duration就是判断是否溢出.
         if (ist->max_pts > ist->min_pts && ist->max_pts - (uint64_t)ist->min_pts < INT64_MAX - duration)
-            duration += ist->max_pts - ist->min_pts;//得到该流的总时长
+            duration += ist->max_pts - ist->min_pts;// 得到该流的总时长
 
-        // 3.3 获取该输入文件中时长为最长的流,以及对应的时基
+        // 3.3 以该流作为输入文件的时长,并保存它以及对应的时基
+        // 当循环时,每次保存该流最长的duration, 作为输入文件中的时长
         ifile->time_base = duration_max(duration, &ifile->duration, ist->st->time_base,
                                         ifile->time_base);
     }
@@ -5763,7 +5768,7 @@ static int process_input(int file_index)
                av_ts2timestr(input_files[ist->file_index]->ts_offset, &AV_TIME_BASE_Q));
     }
 
-    // 6. 主要处理输入文件是 ts 流时的开始时间
+    // 6. 主要处理输入文件是 ts 流
     /* 这里主要是处理 ts 流的，能否进来由pts_wrap_bits决定,pts_wrap_bits(PTS中的位数(用于封装控制))一般值为64.
      * mp4/mkv文件转码不会跑进来. */
     if(!ist->wrap_correction_done && is->start_time != AV_NOPTS_VALUE && ist->st->pts_wrap_bits < 64){
@@ -5774,7 +5779,7 @@ static int process_input(int file_index)
         /* 根据启用的流更正开始时间，
          * 在理想情况下，这应该在第一次使用starttime之前完成，但是我们不知道在那个时候哪些是启用的流。
          * 所以我们在这里做它作为不连续处理的一部分 */
-        if (   ist->next_dts == AV_NOPTS_VALUE
+        if (   ist->next_dts == AV_NOPTS_VALUE      // 首次进来?
             && ifile->ts_offset == -is->start_time
             && (is->iformat->flags & AVFMT_TS_DISCONT)) {// 格式允许时间戳不连续. 不允许的话ts/flv也不会跑进该if
             int64_t new_start_time = INT64_MAX;
@@ -5788,18 +5793,21 @@ static int process_input(int file_index)
             }
 
             // 如果所有输入流的最小的开始时间 都比 AVFormatContext的开始时间大,那么需要调整
+            // is->start_time的值由AVStream->start_time的值推导出来
             if (new_start_time > is->start_time) {
                 av_log(is, AV_LOG_VERBOSE, "Correcting start time by %"PRId64"\n", new_start_time - is->start_time);
-                ifile->ts_offset = -new_start_time;// 为啥直接加和负号?留个疑问
+                ifile->ts_offset = -new_start_time;// 直接加负号修正ts_offset
+                                                   // 例如-ss指定是10s，那么ts_offset=-10s，假设输入流最小开始时间=11s,那么ts_offset=-11s
             }
         }
 
+        // 用于下面的stime2 > stime判断.
         stime = av_rescale_q(is->start_time, AV_TIME_BASE_Q, ist->st->time_base);
         stime2= stime + (1ULL<<ist->st->pts_wrap_bits);// 1ULL特指64无符号bit,1左移pts_wrap_bits位(例如32=4,294,967,296)
                                                        // 1左移pts_wrap_bits位 等价于 2^pts_wrap_bits次方.例如1<<3位=2^3=8
         ist->wrap_correction_done = 1;
 
-        // 留个疑问.这里大概是dts、pts是否越界,越界的话需要减去位数,然后等下一次重新更正.
+        // 主要看if的第三个条件,暂未知道意义.
         if(stime2 > stime && pkt.dts != AV_NOPTS_VALUE && pkt.dts > stime + (1LL<<(ist->st->pts_wrap_bits-1))) {
             pkt.dts -= 1ULL<<ist->st->pts_wrap_bits;
             ist->wrap_correction_done = 0;
@@ -5842,9 +5850,15 @@ static int process_input(int file_index)
         pkt.dts += av_rescale_q(ifile->ts_offset, AV_TIME_BASE_Q, ist->st->time_base);
     if (pkt.pts != AV_NOPTS_VALUE)
         pkt.pts += av_rescale_q(ifile->ts_offset, AV_TIME_BASE_Q, ist->st->time_base);
-#ifdef TYYCODE_TIMESTAMP
-    mydebug(NULL, AV_LOG_INFO, "process_input(), ifile->ts_offset: %"PRId64", pkt.dts: %"PRId64", pkt.pts: %"PRId64"\n",
-            ifile->ts_offset, pkt.dts, pkt.pts);
+#ifdef TYYCODE_TIMESTAMP_DEMUXER
+    mydebug(NULL, AV_LOG_INFO, "process_input(), "
+            "ist_index: %d, type: %s, "
+            "ifile->ts_offset: %"PRId64", "
+            "ist->st->time_base.num: %d, ist->st->time_base.den: %d, "
+            "pkt.dts: %"PRId64", pkt.pts: %"PRId64"\n",
+            ifile->ist_index + pkt.stream_index, av_get_media_type_string(ist->dec_ctx->codec_type),
+            ifile->ts_offset,
+            ist->st->time_base.num, ist->st->time_base.den, pkt.dts, pkt.pts);
 #endif
 
     // 9. -itsscale选项,默认是1.0,设置输入ts的刻度,
@@ -5854,29 +5868,59 @@ static int process_input(int file_index)
     if (pkt.dts != AV_NOPTS_VALUE)
         pkt.dts *= ist->ts_scale;
 
-    // 10. 留个疑问
-    pkt_dts = av_rescale_q_rnd(pkt.dts, ist->st->time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+#ifdef TYYCODE_TIMESTAMP_DEMUXER
+            mydebug(NULL, AV_LOG_INFO,
+                   "process_input(), ist_index: %d, type: %s, ifile->last_ts: %"PRId64"\n",
+                   ifile->ist_index + pkt.stream_index,
+                    av_get_media_type_string(ist->dec_ctx->codec_type),
+                    ifile->last_ts);
+#endif
+    // 10. 当前pkt.dts与上一次的差值超过阈值，则调整ts_offset、pkt.dts、pkt.pts
+    pkt_dts = av_rescale_q_rnd(pkt.dts, ist->st->time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);// 这里因为相除有余数，要四舍五入
     if ((ist->dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO ||
          ist->dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO) && /* 视频或者音频 */
-        pkt_dts != AV_NOPTS_VALUE && ist->next_dts == AV_NOPTS_VALUE && !copy_ts /* dts有效 且 next_dts无效 且 没指定-copyts */
+        pkt_dts != AV_NOPTS_VALUE && ist->next_dts == AV_NOPTS_VALUE && !copy_ts /* dts有效 且 next_dts无效且 没指定-copyts */
         && (is->iformat->flags & AVFMT_TS_DISCONT) && ifile->last_ts != AV_NOPTS_VALUE) {// 允许时间戳不连续 且 last_ts有效
         int64_t delta   = pkt_dts - ifile->last_ts;// 两次dts差值
         if (delta < -1LL*dts_delta_threshold*AV_TIME_BASE ||
-            delta >  1LL*dts_delta_threshold*AV_TIME_BASE){//时间戳改变不在阈值范围[-dts_delta_threshold, dts_delta_threshold]
+            delta >  1LL*dts_delta_threshold*AV_TIME_BASE){// 时间戳改变不在阈值范围[-dts_delta_threshold, dts_delta_threshold]
             ifile->ts_offset -= delta;
             av_log(NULL, AV_LOG_DEBUG,
                    "Inter stream timestamp discontinuity %"PRId64", new offset= %"PRId64"\n",
                    delta, ifile->ts_offset);
+#ifdef TYYCODE_TIMESTAMP_DEMUXER
+            mydebug(NULL, AV_LOG_INFO,
+                   "process_input(), Inter stream timestamp discontinuity %"PRId64", new offset= %"PRId64"\n",
+                   delta, ifile->ts_offset);
+#endif
             pkt.dts -= av_rescale_q(delta, AV_TIME_BASE_Q, ist->st->time_base);
             if (pkt.pts != AV_NOPTS_VALUE)
                 pkt.pts -= av_rescale_q(delta, AV_TIME_BASE_Q, ist->st->time_base);
         }
     }
 
-    // 11. 使用duration给pkt.pts算出显示时间戳,以及保存最大的pts和最小的pts,这样后面可以根据两者相减算出文件时长.
+#ifdef TYYCODE_TIMESTAMP_DEMUXER
+    // 查看duration值的变化
+    mydebug(NULL, AV_LOG_INFO,
+           "process_input(), ist_index: %d, type: %s, "
+           "ifile->duration: %"PRId64", "
+           "ifile->time_base.num: %d, ifile->time_base.den: %d, "
+           "ist->st->time_base.num: %d, ist->st->time_base: %d, "
+           "ist->max_pts: %"PRId64", ist->min_pts: %"PRId64"\n",
+           ifile->ist_index + pkt.stream_index, av_get_media_type_string(ist->dec_ctx->codec_type),
+           ifile->duration,
+           ifile->time_base.num, ifile->time_base.den,
+           ist->st->time_base.num, ist->st->time_base.den,
+           ist->max_pts, ist->min_pts);
+#endif
+
+    // 11. pkt的pts、dts加上文件时长duration的作用:
+    // 当循环推流时(-stream_loop选项),每次读出来的pts、dts都需要加上输入文件的时长,原因是pts、dts要单调递增.
+    // 不循环时,ifile->duration是0.
     duration = av_rescale_q(ifile->duration, ifile->time_base, ist->st->time_base);
     if (pkt.pts != AV_NOPTS_VALUE) {
         pkt.pts += duration;
+        // 保存最大的pts和最小的pts, 这样后面可以根据两者相减算出文件时长.
         ist->max_pts = FFMAX(pkt.pts, ist->max_pts);
         ist->min_pts = FFMIN(pkt.pts, ist->min_pts);
     }
@@ -5884,7 +5928,7 @@ static int process_input(int file_index)
     if (pkt.dts != AV_NOPTS_VALUE)
         pkt.dts += duration;
 
-    // 12. 算下一帧的差值.和第9步的条件基本一样.留个疑问
+    // 12. 算当前帧与下一帧的差值.
     pkt_dts = av_rescale_q_rnd(pkt.dts, ist->st->time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
     if ((ist->dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO ||
          ist->dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO) &&
@@ -5894,7 +5938,7 @@ static int process_input(int file_index)
         if (is->iformat->flags & AVFMT_TS_DISCONT) {
             if (delta < -1LL*dts_delta_threshold*AV_TIME_BASE ||
                 delta >  1LL*dts_delta_threshold*AV_TIME_BASE ||
-                pkt_dts + AV_TIME_BASE/10 < FFMAX(ist->pts, ist->dts)) {
+                pkt_dts + AV_TIME_BASE/10 < FFMAX(ist->pts, ist->dts)) {// pkt的dts与ist保存的pts,dts相差太大,也要调整
                 ifile->ts_offset -= delta;
                 av_log(NULL, AV_LOG_DEBUG,
                        "timestamp discontinuity for stream #%d:%d "
