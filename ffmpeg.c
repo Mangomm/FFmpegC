@@ -735,7 +735,7 @@ static void close_all_output_streams(OutputStream *ost, OSTFinished this_stream,
  * @param of 输出文件
  * @param pkt pkt
  * @param ost 输出流
- * @param unqueue 是否排序？
+ * @param unqueue 是否已经计算该pkt在ost->frame_number中,=1表示已经计算。see check_init_output_file()
 */
 static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int unqueue)
 {
@@ -757,27 +757,28 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
      * 由于重新排序，编码的视频帧需要单独计数，参见do_video_out()。
      * 不要在未排队时计数数据包，因为它在排队时已被计数。
      */
-    /* 1."视频需要编码"以外的类型，且unqueue=0时，会判断是否需要丢包. */
+    /* 1. 统计已经写帧的数量. */
+    // "视频需要编码"以外的类型，且unqueue=0表示该pkt没有计算时，会进行计算.
     if (!(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && ost->encoding_needed) && !unqueue) {
         if (ost->frame_number >= ost->max_frames) {//帧数大于允许的最大帧数，不作处理，并将该包释放
             av_packet_unref(pkt);
             return;
         }
-        ost->frame_number++;//视频流时，不会在这里计数
+        ost->frame_number++;// 视频流需要编码时，不会在这里计数，会在do_video_out()单独计数
     }
 
     /* 2.没有写头或者写头失败，先将包缓存在复用队列，然后返回，不会调用到写帧函数 */
     if (!of->header_written) {
         AVPacket tmp_pkt = {0};
         /* the muxer is not initialized yet, buffer the packet(muxer尚未初始化，请缓冲该数据包) */
-        //2.1 fifo没有空间，则给其扩容
-        if (!av_fifo_space(ost->muxing_queue)) {//return f->end - f->buffer - av_fifo_size(f);
-            /*新队列大小求法：若在最大队列大小内，那么以当前队列大小的两倍扩容.
-            例如用户不指定大小，默认是给复用队列先开辟8个空间大小，若此时没空间，说明av_fifo_size()返回的值为8*sizeof(pkt)，
-            那么乘以2后，new_size值就是16个pkt的大小了。*/
+        // 2.1 fifo没有空间，则给其扩容
+        if (!av_fifo_space(ost->muxing_queue)) {// return f->end - f->buffer - av_fifo_size(f);
+            /* 新队列大小求法：若在最大队列大小内，那么以当前队列大小的两倍扩容.
+             * 例如用户不指定大小，默认是给复用队列先开辟8个空间大小，若此时没空间，说明av_fifo_size()返回的值为8*sizeof(pkt)，
+             * 那么乘以2后，new_size值就是16个pkt的大小了. */
             int new_size = FFMIN(2 * av_fifo_size(ost->muxing_queue),
                                  ost->max_muxing_queue_size);
-            /*若输出流的包缓存到达最大复用队列，那么ffmpeg会退出程序*/
+            /* 若输出流的包缓存到达最大复用队列，那么ffmpeg会退出程序 */
             if (new_size <= av_fifo_size(ost->muxing_queue)) {
                 av_log(NULL, AV_LOG_ERROR,
                        "Too many packets buffered for output stream %d:%d.\n",
@@ -788,6 +789,7 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
             if (ret < 0)
                 exit_program(1);
         }
+
         /*
          * av_packet_make_refcounted(): 确保给定数据包所描述的数据被引用计数。
          * @note 此函数不确保引用是可写的。 为此使用av_packet_make_writable。
@@ -801,7 +803,7 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
         ret = av_packet_make_refcounted(pkt);
         if (ret < 0)
             exit_program(1);
-        av_packet_move_ref(&tmp_pkt, pkt);//所有权转移，源码很简单
+        av_packet_move_ref(&tmp_pkt, pkt);// 所有权转移，源码很简单
         /*
          * av_fifo_generic_write(): 将数据从用户提供的回调提供给AVFifoBuffer。
          * @param f 要写入的AVFifoBuffer.
@@ -822,7 +824,7 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
 
     if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
         int i;
-        //关于下面获取q编码质量可参考https://blog.csdn.net/u012117034/article/details/123453863
+        // 关于下面获取q编码质量可参考https://blog.csdn.net/u012117034/article/details/123453863
         /*
          * av_packet_get_side_data():从packet获取side info.
          * @param type 期待side information的类型
@@ -830,11 +832,11 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
          * @return 如果存在数据，则指向数据的指针，否则为NULL.
          * 源码很简单.
         */
-        //获取编码质量状态的side data info
+        // 获取编码质量状态的side data info
         uint8_t *sd = av_packet_get_side_data(pkt, AV_PKT_DATA_QUALITY_STATS,
                                               NULL);
-        //从sd中获取前32bit
-        /*AV_RL32(sd)的大概调用过程：
+        // 从sd中获取前32bit
+        /* AV_RL32(sd)的大概调用过程：
          * 1)AV_RL(32, p)
          * 2）而AV_RL的定义：
          * #   define AV_RL(s, p)    AV_RN##s(p)
@@ -861,10 +863,9 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
                 ost->error[i] = -1;//没有错误
         }
 
-        //是否通过帧率对duration重写
+        // 是否通过帧率对duration重写
         if (ost->frame_rate.num && ost->is_cfr) {
-            //(通过帧速率覆盖数据包持续时间，这应该不会发生)
-            //av_rescale_q的作用看init_output_stream_encode的注释.就是将参2转成参3的单位
+            // (通过帧速率覆盖数据包持续时间，这应该不会发生)
             if (pkt->duration > 0)
                 av_log(NULL, AV_LOG_WARNING, "Overriding packet duration by frame rate, this should not happen\n");
             pkt->duration = av_rescale_q(1, av_inv_q(ost->frame_rate),
@@ -872,14 +873,22 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
         }
     }
 
-    /*内部调用av_rescale_q，将pkt里面与时间戳相关的pts、dts、duration、convergence_duration转成以ost->st->time_base为单位*/
+    /* 内部调用av_rescale_q，将pkt里面与时间戳相关的pts、dts、duration、convergence_duration转成以ost->st->time_base为单位 */
     av_packet_rescale_ts(pkt, ost->mux_timebase, ost->st->time_base);
+#ifdef TYYCODE_TIMESTAMP_MUXER
+            mydebug(NULL, AV_LOG_WARNING, "write_packet(), ost->mux_timebase: %d/%d, "
+                    "ost->st->time_base: %d/%d, "
+                    "output stream %d:%d\n",
+                    ost->mux_timebase.num, ost->mux_timebase.den,
+                    ost->st->time_base.num, ost->st->time_base.den,
+                    ost->file_index, ost->st->index);
+#endif
 
-    /*3.输出流需要有时间戳的处理*/
-    /*AVFMT_NOTIMESTAMPS: 格式不需要/有任何时间戳.
-     所以当没有该宏时，就说明需要时间戳*/
+    /* 3.输出流需要有时间戳的处理 */
+    /* AVFMT_NOTIMESTAMPS: 格式不需要/有任何时间戳.
+     * 所以当没有该宏时，就说明需要时间戳 */
     if (!(s->oformat->flags & AVFMT_NOTIMESTAMPS)) {
-        //3.1解码时间戳比显示时间戳大，重写它们的时间戳
+        // 3.1解码时间戳比显示时间戳大，重写它们的时间戳
         if (pkt->dts != AV_NOPTS_VALUE &&
             pkt->pts != AV_NOPTS_VALUE &&
             pkt->dts > pkt->pts) {
@@ -889,42 +898,60 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
             pkt->pts =
             pkt->dts = pkt->pts + pkt->dts + ost->last_mux_dts + 1
                      - FFMIN3(pkt->pts, pkt->dts, ost->last_mux_dts + 1)
-                     - FFMAX3(pkt->pts, pkt->dts, ost->last_mux_dts + 1);//减去最大最小值，最终得到的就是三者之中，处于中间的那个值
+                     - FFMAX3(pkt->pts, pkt->dts, ost->last_mux_dts + 1);// 减去最大最小值，最终得到的就是三者之中，处于中间的那个值
+#ifdef TYYCODE_TIMESTAMP_MUXER
+            mydebug(NULL, AV_LOG_WARNING, "write_packet(), pkt->dts: %"PRId64", pkt->pts: %"PRId64", ost->last_mux_dts + 1: %"PRId64", "
+                    "output stream %d:%d\n", pkt->dts, pkt->pts, ost->last_mux_dts + 1, ost->file_index, ost->st->index);
+#endif
         }
 
-        /*3.2这里后续再详细研究*/
+        /* 3.2根据输出格式是否有AVFMT_TS_NONSTRICT宏,以修正pkt的pts/dts */
         if ((st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO || st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO || st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) &&
             pkt->dts != AV_NOPTS_VALUE &&
-            !(st->codecpar->codec_id == AV_CODEC_ID_VP9 && ost->stream_copy) && /*VP9且不转码以外的条件*/
+            !(st->codecpar->codec_id == AV_CODEC_ID_VP9 && ost->stream_copy) && /* VP9且不转码以外的条件 */
             ost->last_mux_dts != AV_NOPTS_VALUE) {
-            /*AVFMT_TS_NONSTRICT：格式不需要严格增加时间戳，但它们仍然必须是单调的*/
+            /* AVFMT_TS_NONSTRICT：格式不需要严格增加时间戳，但它们仍然必须是单调的 */
+            // 包含该宏,max是last_mux_dts; 不包含,max是last_mux_dts+1,相当于预测下一pkt的dts?需要知道ost->st->time_base时基下,加1的意思
             int64_t max = ost->last_mux_dts + !(s->oformat->flags & AVFMT_TS_NONSTRICT);
+
+#ifdef TYYCODE_TIMESTAMP_MUXER
+            mydebug(NULL, AV_LOG_INFO, "write_packet(), --, "
+                    "pkt->dts: %"PRId64", pkt->pts: %"PRId64", ost->last_mux_dts + 1: %"PRId64", ""max, "
+                    "%"PRId64",output stream %d:%d\n",
+                    pkt->dts, pkt->pts, ost->last_mux_dts + 1, max,
+                    ost->file_index, ost->st->index);
+#endif
+
             if (pkt->dts < max) {
                 int loglevel = max - pkt->dts > 2 || st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ? AV_LOG_WARNING : AV_LOG_DEBUG;
                 av_log(s, loglevel, "Non-monotonous DTS in output stream "
                        "%d:%d; previous: %"PRId64", current: %"PRId64"; ",
-                       ost->file_index, ost->st->index, ost->last_mux_dts, pkt->dts);//dts没有单调递增
+                       ost->file_index, ost->st->index, ost->last_mux_dts, pkt->dts);// dts没有单调递增
                 if (exit_on_error) {//-xerror选项，默认是0
                     av_log(NULL, AV_LOG_FATAL, "aborting.\n");
                     exit_program(1);
                 }
                 av_log(s, loglevel, "changing to %"PRId64". This may result "
                        "in incorrect timestamps in the output file.\n",
-                       max);//(这可能会导致输出文件中的时间戳不正确)
+                       max);// (这可能会导致输出文件中的时间戳不正确)
+#ifdef TYYCODE_TIMESTAMP_MUXER
+                mydebug(NULL, AV_LOG_INFO, "write_packet(), pkt->dts < max\n");
+#endif
                 if (pkt->pts >= pkt->dts)
                     pkt->pts = FFMAX(pkt->pts, max);
                 pkt->dts = max;
             }
+
         }
     }
-    ost->last_mux_dts = pkt->dts;   //保存最近一次有效的dts
+    ost->last_mux_dts = pkt->dts;   // 保存最近一次有效的dts
 
-    ost->data_size += pkt->size;    //统计所有写入的包的字节大小
-    ost->packets_written++;         //统计所有写入的包的个数
+    ost->data_size += pkt->size;    // 统计所有写入的包的字节大小
+    ost->packets_written++;         // 统计所有写入的包的个数
 
     pkt->stream_index = ost->index;
 
-    if (debug_ts) {//-debug_ts选项
+    if (debug_ts) {// -debug_ts选项
         av_log(NULL, AV_LOG_INFO, "muxer <- type:%s "
                 "pkt_pts:%s pkt_pts_time:%s pkt_dts:%s pkt_dts_time:%s size:%d\n",
                 av_get_media_type_string(ost->enc_ctx->codec_type),
@@ -987,7 +1014,7 @@ static void output_packet(OutputFile *of, AVPacket *pkt,
 
     /* apply the output bitstream filters, if any.(如果有的话，应用输出位流过滤器) */
     // 1. 有位流的写包流程
-    if (ost->nb_bitstream_filters) {//推流没用到,暂未研究
+    if (ost->nb_bitstream_filters) {// 推流没用到,暂未研究
         int idx;
 
         ret = av_bsf_send_packet(ost->bsf_ctx[0], eof ? NULL : pkt);
@@ -1020,7 +1047,7 @@ static void output_packet(OutputFile *of, AVPacket *pkt,
             else
                 write_packet(of, pkt, ost, 0);
         }
-    } else if (!eof)//没位流的流程, 且eof=0. 没位流 且 eof=1时，该函数不处理任何东西
+    } else if (!eof)// 没位流的流程, 且eof=0. 没位流 且 eof=1时，该函数不处理任何东西
         write_packet(of, pkt, ost, 0);
 
 finish:
@@ -1065,19 +1092,19 @@ static void do_audio_out(OutputFile *of, OutputStream *ost,
     pkt.data = NULL;
     pkt.size = 0;
 
-    //1. 检查该输出流是否完成编码.主要与录像时长有关.
+    // 1. 检查该输出流是否完成编码.主要与录像时长有关.
     if (!check_recording_time(ost))
         return;
 
-    //2. 输入帧为空，或者 audio_sync_method小于0，pts会参考ost->sync_opts
+    // 2. 输入帧为空，或者 audio_sync_method小于0，pts会参考ost->sync_opts
     if (frame->pts == AV_NOPTS_VALUE || audio_sync_method < 0)
         frame->pts = ost->sync_opts;
 
-    //3. 根据当前帧的pts和nb_samples预估下一帧的pts。
-    ost->sync_opts = frame->pts + frame->nb_samples;//音频时,frame->pts的单位是采样点个数,例如采样点数是1024,采样频率是44.1k，那么就是0.23s.
-                                                    //可参考ffplay的decoder_decode_frame()注释
+    // 3. 根据当前帧的pts和nb_samples预估下一帧的pts。
+    ost->sync_opts = frame->pts + frame->nb_samples;// 音频时,frame->pts的单位是采样点个数,例如采样点数是1024,采样频率是44.1k，那么就是0.23s.
+                                                    // 可参考ffplay的decoder_decode_frame()注释
 
-    //4. 统计已经编码的采样点个数和帧数.
+    // 4. 统计已经编码的采样点个数和帧数.
     ost->samples_encoded += frame->nb_samples;
     ost->frames_encoded++;
 
@@ -1090,14 +1117,14 @@ static void do_audio_out(OutputFile *of, OutputStream *ost,
                enc->time_base.num, enc->time_base.den);
     }
 
-    //5. 发送输入帧到编码器进行编码
+    // 5. 发送输入帧到编码器进行编码
     ret = avcodec_send_frame(enc, frame);
     if (ret < 0)
         goto error;
 
-    //6. 循环获取编码后的帧,并进行写帧
+    // 6. 循环获取编码后的帧,并进行写帧
     while (1) {
-        //6.1 获取编码后的帧
+        // 6.1 获取编码后的帧
         ret = avcodec_receive_packet(enc, &pkt);
         if (ret == AVERROR(EAGAIN))
             break;
@@ -1106,7 +1133,7 @@ static void do_audio_out(OutputFile *of, OutputStream *ost,
 
         update_benchmark("encode_audio %d.%d", ost->file_index, ost->index);
 
-        av_packet_rescale_ts(&pkt, enc->time_base, ost->mux_timebase);//每次写帧前都会将pts转成复用的时基
+        av_packet_rescale_ts(&pkt, enc->time_base, ost->mux_timebase);// 每次写帧前都会将pts转成复用的时基
 
         if (debug_ts) {
             av_log(NULL, AV_LOG_INFO, "encoder -> type:audio "
@@ -1115,7 +1142,7 @@ static void do_audio_out(OutputFile *of, OutputStream *ost,
                    av_ts2str(pkt.dts), av_ts2timestr(pkt.dts, &enc->time_base));
         }
 
-        //6.2 写帧
+        // 6.2 写帧
         output_packet(of, &pkt, ost, 0);
     }
 
@@ -1213,7 +1240,7 @@ static void do_subtitle_out(OutputFile *of,
  * @param of 输出文件
  * @param ost 输出流
  * @param next_picture 要编码的帧
- * @param sync_ipts 要编码的帧的pts.即AVFrame->pts的值
+ * @param sync_ipts 要编码的帧的pts.即AVFrame->pts的值,但精度更好
 */
 static void do_video_out(OutputFile *of,
                          OutputStream *ost,
@@ -1235,14 +1262,13 @@ static void do_video_out(OutputFile *of,
     if (ost->source_index >= 0)
         ist = input_streams[ost->source_index];
 
-    /* 1.获取duration.其中获取duration会参考以下3种方法，duration是可能被重写的
-     * 单位最终都被转成enc->time_base. */
+    /* 1.获取duration.其中获取duration会参考以下3种方法，duration是可能被重写的 */
     /* 1.1通过过滤器里面的帧率得到duration */
     frame_rate = av_buffersink_get_frame_rate(filter);
     if (frame_rate.num > 0 && frame_rate.den > 0)
         /*
          * 我们在init_output_stream_encode()调用init_encoder_time_base()看到，以视频为例，
-         * AVCodecContext->time_base是由帧率的倒数赋值的，所以这里求出的duration基本是1*/
+         * AVCodecContext->time_base是由帧率的倒数赋值的，所以这里求出的duration基本是1 */
         duration = 1/(av_q2d(frame_rate) * av_q2d(enc->time_base));
 
     /* 1.2若用户指定-r帧率选项，则通过用户的-r选项得到duration */
@@ -1262,76 +1288,106 @@ static void do_video_out(OutputFile *of,
          * 下面是利用两个比相等求出的：d1/t1=d2/t2，假设pkt_duration=40，ist->st->time_base={1,1000},enc->time_base={1,25}
          * 那么next_picture->pkt_duration * av_q2d(ist->st->time_base)得到的就是40/1000;也就是d1/t1，
          * 而除以1/25，那么就变成乘以25，最终得到式子d2=(d1*t2)/t1，即d2=(40*25)/1000。
-         * 单位变成编码器的时基.
          */
         duration = lrintf(next_picture->pkt_duration * av_q2d(ist->st->time_base) / av_q2d(enc->time_base));
+        //duration = av_rescale_q(next_picture->pkt_duration, ist->st->time_base, enc->time_base);// 等价于lrintf的处理,但传参是int64
     }
 
+    {
+        int a = mid_pred(1,3,5);    // 3
+        a = mid_pred(3,4,7);        // 4
+        a = mid_pred(4,1,11);       // 4
+        a = mid_pred(5,5,11);       // 5
+        a = mid_pred(100,4,20);     // 20
+        int b = 0;
+    }
+
+    /*
+     * eof时进来. 在reap_filters的av_buffersink_get_frame_flags调用失败时，
+     * flush=1且是文件末尾，并是视频类型时，会传next_picture=NULL进来.
+     * 可以全局搜一下do_video_out函数，只在两处地方被调用. */
     if (!next_picture) {
         // end, flushing
-        /* 一段汇编代码，取中值？一般不会进来.
-         * 但在reap_filters的av_buffersink_get_frame_flags调用失败时，
-         * flush=1且是文件末尾，并是视频类型时，会传next_picture=NULL进来.
-         * 可以全局搜一下do_video_out函数，只在两处地方被调用. */
+        /* mid_pred():一段汇编代码，它的作用是取三个数中,值在中间的那个数. */
         nb0_frames = nb_frames = mid_pred(ost->last_nb0_frames[0],
                                           ost->last_nb0_frames[1],
                                           ost->last_nb0_frames[2]);
     } else {
         /* delta0是输入帧(next_picture)与输出帧之间的“漂移” */
         delta0 = sync_ipts - ost->sync_opts; // delta0 is the "drift" between the input frame (next_picture) and where it would fall in the output.
-        delta  = delta0 + duration;
+        delta  = delta0 + duration;// 此次输入帧next_picture应显示的时长?
+
+#ifdef TYYCODE_TIMESTAMP_ENCODER
+        // 不要用av_ts2str()宏打印浮点数,会导致精度缺少
+        mydebug(NULL, AV_LOG_INFO, "do_video_out(), sync_ipts: %f, ost->sync_opts: %"PRId64", delta0: %f, "
+                "duration: %f, delta: %f, "
+                "time_base:%d/%d\n",
+                sync_ipts, ost->sync_opts, delta0,
+                duration, delta,
+                ost->enc_ctx->time_base.num, ost->enc_ctx->time_base.den);
+#endif
 
         /* by default, we output a single frame(默认情况下，我们输出单个帧). */
         nb0_frames = 0; // tracks the number of times the PREVIOUS frame should be duplicated, mostly for variable framerate (VFR)
                         // (跟踪前一帧应该被复制的次数，主要是为了可变帧率(VFR))
-        nb_frames = 1;
+        nb_frames = 1;  // 默认编码一帧
 
         /* 选项视频同步格式 */
-        format_video_sync = video_sync_method;//video_sync_method默认是-1(VSYNC_AUTO)
+        format_video_sync = video_sync_method;// video_sync_method默认是-1(VSYNC_AUTO)
         // 自动选择视频同步格式
         if (format_video_sync == VSYNC_AUTO) {
             if(!strcmp(of->ctx->oformat->name, "avi")) {
-                format_video_sync = VSYNC_VFR;//输出格式是avi，使用可变帧率.
+                format_video_sync = VSYNC_VFR;// 输出格式是avi，使用可变帧率.
             } else
-                /*1.输出文件格式允许可变帧率：
+                /* 1.输出文件格式允许可变帧率：
                     1）输出文件格式也允许没有时间戳，则视频同步格式为VSYNC_PASSTHROUGH。
                     2）输出文件格式不允许没有时间戳，则视频同步格式为VSYNC_VFR。(正常走这里)
                   2.输出文件格式不允许可变帧率，则为VSYNC_CFR。*/
                 format_video_sync = (of->ctx->oformat->flags & AVFMT_VARIABLE_FPS) ?
                             ((of->ctx->oformat->flags & AVFMT_NOTIMESTAMPS) ? VSYNC_PASSTHROUGH : VSYNC_VFR) : VSYNC_CFR;
 
-            //如果是VSYNC_CFR才会往下走
+            // 如果是VSYNC_CFR才会往下判断
             if (   ist
                 && format_video_sync == VSYNC_CFR
-                && input_files[ist->file_index]->ctx->nb_streams == 1   //输入流只有1个
-                && input_files[ist->file_index]->input_ts_offset == 0)  //留个疑问？
+                && input_files[ist->file_index]->ctx->nb_streams == 1   // 输入流(视频流)只有1个
+                && input_files[ist->file_index]->input_ts_offset == 0)  // 默认是0
             {
                 format_video_sync = VSYNC_VSCFR;
             }
-            if (format_video_sync == VSYNC_CFR && copy_ts) {//-copyts选项
+            if (format_video_sync == VSYNC_CFR && copy_ts) {// -copyts选项
                 format_video_sync = VSYNC_VSCFR;
             }
         }
 
         ost->is_cfr = (format_video_sync == VSYNC_CFR || format_video_sync == VSYNC_VSCFR);
 
-        //控制sync_ipts、sync_opts的差距
-        //sync_ipts、sync_opts的具体意义需要后续研究
-        if (delta0 < 0 && /* sync_ipts落后于ost->sync_opts */
+        // sync_ipts < sync_opts时的控制处理
+        if (delta0 < 0 && /* sync_ipts小于ost->sync_opts */
             delta > 0 &&  /* delta0此时为负，而根据上面delta的计算，此时delta0 + duration需要是一个正数 */
             format_video_sync != VSYNC_PASSTHROUGH &&
             format_video_sync != VSYNC_DROP) {
             if (delta0 < -0.6) {
                 av_log(NULL, AV_LOG_VERBOSE, "Past duration %f too large\n", -delta0);
             } else
-                av_log(NULL, AV_LOG_DEBUG, "Clipping frame in rate conversion by %f\n", -delta0);//裁剪帧的速率转换为-delta0
-                //av_log(NULL, AV_LOG_INFO, "Clipping frame in rate conversion by %f\n", -delta0);//裁剪帧的速率转换为-delta0
-            sync_ipts = ost->sync_opts;//使sync_ipts追上sync_opts
-            duration += delta0;//那么此时，时长应该减去追上的那一段，即delta0，因为输入与输出的差就是delta0.
+                av_log(NULL, AV_LOG_DEBUG, "Clipping frame in rate conversion by %f\n", -delta0);// 裁剪帧的速率转换为-delta0
+
+            sync_ipts = ost->sync_opts;// 使sync_ipts等于sync_opts,相当于让这一帧慢点显示
+            duration += delta0;// 那么此时，时长应该减去追上的那一段，即delta0，因为输入与输出的差就是delta0.
             delta0 = 0;
+
+#ifdef TYYCODE_TIMESTAMP_ENCODER
+        // 不要用av_ts2str()宏打印浮点数,会导致精度缺少
+        mydebug(NULL, AV_LOG_INFO, "do_video_out() control, sync_ipts: %f, ost->sync_opts: %"PRId64", delta0: %f, "
+                "duration: %f, delta: %f, "
+                "time_base:%d/%d\n",
+                sync_ipts, ost->sync_opts, delta0,
+                duration, delta,
+                ost->enc_ctx->time_base.num, ost->enc_ctx->time_base.den);
+#endif
+
         }
 
-        //后续研究
+        // 先研究VFR,其它后续研究
         switch (format_video_sync) {
         case VSYNC_VSCFR:
             if (ost->frame_number == 0 && delta0 >= 0.5) {
@@ -1352,12 +1408,27 @@ static void do_video_out(OutputFile *of,
                     nb0_frames = lrintf(delta0 - 0.6);
             }
             break;
-        case VSYNC_VFR://主要研究这里
-            if (delta <= -0.6)//delta是个负数，不会进入上面的if控制语句，那么由上面语句代入delta计算得到：sync_opts - sync_ipts - duration >= 0.6
-                              //意思是输出比输入超过一帧，且还有0.6s剩余？
+        case VSYNC_VFR:// 主要研究这里
+            if (delta <= -0.6)// delta是个负数，不会进入上面的if控制语句，那么由上面语句代入delta计算得到：sync_opts - sync_ipts - duration >= 0.6
+                              // 意思是: 输入比输出 小于 一帧+0.6，标记nb_frames=0,表示该帧不显示
                 nb_frames = 0;
-            else if (delta > 0.6)//需要考虑上面的if语句，sync_ipts - sync_opts + duration > 0.6
-                ost->sync_opts = lrint(sync_ipts);//这里不太清楚，留个疑问
+            else if (delta > 0.6)// 需要考虑上面的if语句，sync_ipts - sync_opts + duration > 0.6
+                ost->sync_opts = lrint(sync_ipts);// 两种情况:1)sync_ipts < sync_opts时,因为delta0<0,一般此时delta大于0,所以上面if会
+                                                  //          将ost->sync_opts赋值给sync_ipts,这里相当于赋原来的值,所以这种情况没太大意义.
+                                                  //       2)sync_ipts > sync_opts时,不会进入上面的if,这种就是当输入帧的pts比输出的pts大,输出的pts要追上
+#ifdef TYYCODE_TIMESTAMP_ENCODER
+            else if(delta > -0.6 && delta <= 0.6){
+                mydebug(NULL, AV_LOG_INFO, "do_video_out() switch else if, sync_ipts: %f, ost->sync_opts: %"PRId64", delta0: %f, "
+                        "duration: %f, delta: %f\n",
+                        sync_ipts, ost->sync_opts, delta0,
+                        duration, delta);
+            }
+#endif
+#ifdef TYYCODE_TIMESTAMP_ENCODER
+        // 不要用av_ts2str()宏打印浮点数,会导致精度缺少
+        mydebug(NULL, AV_LOG_INFO, "do_video_out() switch, delta: %f, nb_frames: %d, "
+                "sync_ipts: %f, ost->sync_opts: %"PRId64"\n", delta, nb_frames, sync_ipts, ost->sync_opts);
+#endif
             break;
         case VSYNC_DROP:
         case VSYNC_PASSTHROUGH:
@@ -1368,19 +1439,27 @@ static void do_video_out(OutputFile *of,
         }
     }//<== else end ==>
 
-    nb_frames = FFMIN(nb_frames, ost->max_frames - ost->frame_number);// frame_number>=最大帧数，nb_frames将会是0或者负数
-    nb0_frames = FFMIN(nb0_frames, nb_frames);
+    // 判断可进行编码的帧数. 当frame_number>=最大帧数，nb_frames将会是0或者负数,表示不能再编码.
+    nb_frames = FFMIN(nb_frames, ost->max_frames - ost->frame_number);
+    nb0_frames = FFMIN(nb0_frames, nb_frames);// VFR时这里没太大意义
+#ifdef TYYCODE_TIMESTAMP_ENCODER
+        mydebug(NULL, AV_LOG_INFO, "do_video_out() , ost->max_frames: %"PRId64", ost->frame_number: %d, "
+                "nb_frames: %d, nb0_frames: %d\n",
+                ost->max_frames, ost->frame_number, nb_frames, nb0_frames);
+#endif
 
-    //将数组的第一、第二个元素拷贝到第二、第三个元素的位置.
-    //注，因为这里在拷贝第一个元素时，会将第二个元素的内容覆盖，
-    //所以绝对不能使用memcpy，只能使用memmove，因为它能确保拷贝之前将重复的内存先拷贝到目的地址。
-    //see https://www.runoob.com/cprogramming/c-function-memmove.html.
+
+    // 记录nb0_frames
+    // 将数组的第一、第二个元素拷贝到第二、第三个元素的位置.
+    // 注，因为这里在拷贝第一个元素时，会将第二个元素的内容覆盖，
+    // 所以绝对不能使用memcpy，只能使用memmove，因为它能确保拷贝之前将重复的内存先拷贝到目的地址。
+    // see https://www.runoob.com/cprogramming/c-function-memmove.html.
     memmove(ost->last_nb0_frames + 1,
             ost->last_nb0_frames,
             sizeof(ost->last_nb0_frames[0]) * (FF_ARRAY_ELEMS(ost->last_nb0_frames) - 1));//与memcpy一样，但更安全
     ost->last_nb0_frames[0] = nb0_frames;
 
-    //暂不太清楚下面的意思,后续研究
+    // 转码推流不会进来,后续研究
     if (nb0_frames == 0 && ost->last_dropped) {
         nb_frames_drop++;
         av_log(NULL, AV_LOG_VERBOSE,
@@ -1403,6 +1482,7 @@ static void do_video_out(OutputFile *of,
     }
     ost->last_dropped = nb_frames == nb0_frames && next_picture;
 
+    // 进行编码
     /* duplicates frame if needed */
     for (i = 0; i < nb_frames; i++) {
         AVFrame *in_picture;
@@ -1412,28 +1492,30 @@ static void do_video_out(OutputFile *of,
         pkt.data = NULL;
         pkt.size = 0;
 
-        //in_picture第一次进来指向首帧，后续指向上一帧？
+        // 获取要编码的帧in_picture
         if (i < nb0_frames && ost->last_frame) {
-            in_picture = ost->last_frame;//这里正常不会进来
+            in_picture = ost->last_frame;// 这里正常不会进来
         } else
             in_picture = next_picture;
 
         if (!in_picture)
             return;
 
+        // 更新要编码的帧的pts
         in_picture->pts = ost->sync_opts;
 
+        // 检查录像时间
         if (!check_recording_time(ost))
             return;
 
-        //包含两个宏其中之一 并且 top_field_first>=0
-        //AV_CODEC_FLAG_INTERLACED_DCT指隔行扫描？AV_CODEC_FLAG_INTERLACED_ME注释是：交错运动估计
+        // 包含两个宏其中之一 并且 top_field_first>=0
+        // AV_CODEC_FLAG_INTERLACED_DCT指隔行扫描？AV_CODEC_FLAG_INTERLACED_ME注释是：交错运动估计
         if (enc->flags & (AV_CODEC_FLAG_INTERLACED_DCT | AV_CODEC_FLAG_INTERLACED_ME) &&
             ost->top_field_first >= 0)
-            in_picture->top_field_first = !!ost->top_field_first;//如果内容是交错的，则首先显示顶部字段。
+            in_picture->top_field_first = !!ost->top_field_first;// 如果内容是交错的，则首先显示顶部字段。
 
-        //设置field_order。field_order: 交错视频中的场的顺序。
-        if (in_picture->interlaced_frame) {//图片的内容是交错的
+        // 设置field_order。field_order: 交错视频中的场的顺序。
+        if (in_picture->interlaced_frame) {// 图片的内容是交错的
             if (enc->codec->id == AV_CODEC_ID_MJPEG)
                 mux_par->field_order = in_picture->top_field_first ? AV_FIELD_TT:AV_FIELD_BB;
             else
@@ -1441,23 +1523,23 @@ static void do_video_out(OutputFile *of,
         } else
             mux_par->field_order = AV_FIELD_PROGRESSIVE;
 
-        in_picture->quality = enc->global_quality;//编解码器的全局质量，无法按帧更改。这应该与MPEG-1/2/4 qscale成比例。
-        in_picture->pict_type = 0;//Picture type of the frame.
+        in_picture->quality = enc->global_quality;// 编解码器的全局质量，无法按帧更改。这应该与MPEG-1/2/4 qscale成比例。
+        in_picture->pict_type = 0;// Picture type of the frame.
 
-        //利用AVFrame的pts给ost->forced_kf_ref_pts赋值
+        // 利用AVFrame的pts给ost->forced_kf_ref_pts赋值
         if (ost->forced_kf_ref_pts == AV_NOPTS_VALUE &&
             in_picture->pts != AV_NOPTS_VALUE)
             ost->forced_kf_ref_pts = in_picture->pts;
 
-        //单位转成秒？此时的in_picture->pts - ost->forced_kf_ref_pts单位都是enc->time_base？留个疑问
+        // 单位转成秒.因为此时的in_picture->pts - ost->forced_kf_ref_pts单位都是enc->time_base
         pts_time = in_picture->pts != AV_NOPTS_VALUE ?
             (in_picture->pts - ost->forced_kf_ref_pts) * av_q2d(enc->time_base) : NAN;
 
         if (ost->forced_kf_index < ost->forced_kf_count &&
-            in_picture->pts >= ost->forced_kf_pts[ost->forced_kf_index]) {//正常流程不会进来
+            in_picture->pts >= ost->forced_kf_pts[ost->forced_kf_index]) {// 正常流程不会进来
             ost->forced_kf_index++;
             forced_keyframe = 1;
-        } else if (ost->forced_keyframes_pexpr) {//正常流程不会进来
+        } else if (ost->forced_keyframes_pexpr) {// 正常流程不会进来
             double res;
             ost->forced_keyframes_expr_const_values[FKF_T] = pts_time;
             res = av_expr_eval(ost->forced_keyframes_pexpr,
@@ -1481,11 +1563,11 @@ static void do_video_out(OutputFile *of,
             ost->forced_keyframes_expr_const_values[FKF_N] += 1;
         } else if (   ost->forced_keyframes
                    && !strncmp(ost->forced_keyframes, "source", 6)
-                   && in_picture->key_frame==1) {//正常流程不会进来
+                   && in_picture->key_frame==1) {// 正常流程不会进来
             forced_keyframe = 1;
         }
 
-        if (forced_keyframe) {//正常流程不会进来
+        if (forced_keyframe) {// 正常流程不会进来
             in_picture->pict_type = AV_PICTURE_TYPE_I;
             av_log(NULL, AV_LOG_DEBUG, "Forced keyframe at time %f\n", pts_time);
         }
@@ -1498,9 +1580,9 @@ static void do_video_out(OutputFile *of,
                    enc->time_base.num, enc->time_base.den);
         }
 
-        ost->frames_encoded++;//统计发送到编码器的帧个数
+        ost->frames_encoded++;// 统计发送到编码器的帧个数
 
-        //将帧发送到编码器
+        // 将帧发送到编码器
         ret = avcodec_send_frame(enc, in_picture);
         if (ret < 0)
             goto error;
@@ -1509,7 +1591,7 @@ static void do_video_out(OutputFile *of,
         // av_frame_remove_side_data(): 如果frame中存在所提供类型的边数据，请将其释放并从frame中删除
         av_frame_remove_side_data(in_picture, AV_FRAME_DATA_A53_CC);
 
-        //循环从编码器中读取编码后的帧
+        // 循环从编码器中读取编码后的帧
         while (1) {
             ret = avcodec_receive_packet(enc, &pkt);
             update_benchmark("encode_video %d.%d", ost->file_index, ost->index);
@@ -1536,11 +1618,11 @@ static void do_video_out(OutputFile *of,
              * NOTE: 对于实现AVCodec.encode2()函数的编码器，设置此标志还意味着编码器必须设置每个输出包的pts和持续时间。
              * 如果未设置此标志，则pts和持续时间将由libavcodec从输入帧中确定。
             */
-            //编码后的pkt.pts为空 且 编码器能力集不包含AV_CODEC_CAP_DELAY
+            // 编码后的pkt.pts为空 且 编码器能力集不包含AV_CODEC_CAP_DELAY
             if (pkt.pts == AV_NOPTS_VALUE && !(enc->codec->capabilities & AV_CODEC_CAP_DELAY))
                 pkt.pts = ost->sync_opts;
 
-            //将编码后的时基转成复用时基,这里需要留意
+            // 将编码后的时基转成复用时基,这里需要留意
             av_packet_rescale_ts(&pkt, enc->time_base, ost->mux_timebase);
 
             if (debug_ts) {
@@ -1550,11 +1632,11 @@ static void do_video_out(OutputFile *of,
                     av_ts2str(pkt.dts), av_ts2timestr(pkt.dts, &ost->mux_timebase));
             }
 
-            frame_size = pkt.size;//记录当前帧大小
-            output_packet(of, &pkt, ost, 0);//内部会写帧
+            frame_size = pkt.size;// 记录当前帧大小
+            output_packet(of, &pkt, ost, 0);// 内部会写帧
 
             /* if two pass, output log */
-            if (ost->logfile && enc->stats_out) {//忽略，推流没用到
+            if (ost->logfile && enc->stats_out) {// 忽略，推流没用到
                 fprintf(ost->logfile, "%s", enc->stats_out);
             }
         }//<== while (1) end ==>
@@ -1565,7 +1647,7 @@ static void do_video_out(OutputFile *of,
          * But there may be reordering, so we can't throw away frames on encoder
          * flush, we need to limit them here, before they go into encoder.
          */
-        /* 对于视频，输入的帧数=输出的包数。但是可能会有重新排序，所以我们不能在编码器刷新时丢弃帧，
+        /* 对于视频，输入的帧数=输出的包数。但是可能会有重新排序，所以我们不能在编码器flush时丢弃帧，
          * 我们需要在它们进入编码器之前，在这里限制它们. */
         ost->frame_number++;
 
@@ -1574,14 +1656,14 @@ static void do_video_out(OutputFile *of,
             do_video_stats(ost, frame_size);
     }//<== for (i = 0; i < nb_frames; i++) end ==>
 
-    //将当前帧引用给last_frame
+    // 将当前帧引用给last_frame
     if (!ost->last_frame)
         ost->last_frame = av_frame_alloc();
     av_frame_unref(ost->last_frame);
     if (next_picture && ost->last_frame)
         av_frame_ref(ost->last_frame, next_picture);
     else
-        av_frame_free(&ost->last_frame);//next_picture为空会进入这里，因为last_frame在上面是av_frame_alloc的
+        av_frame_free(&ost->last_frame);// next_picture为空会进入这里，因为last_frame在上面是av_frame_alloc的
 
     return;
 error:
@@ -1744,42 +1826,46 @@ static int reap_filters(int flush)
                 continue;
             }
 
-            //计算float_pts、filtered_frame->pts的值.
-            //思路也不难:
-            //1)若用户指定start_time，则解码后的帧的显示时间戳需要减去start_time。
-            //例如本来3s显示该帧，假设用户start_time=1s，那么就应该在3-1=2s就显示该帧.
-            //2)若没指定，则值不会变.
-            //这两者求法是一样的，区别是float_pts用的tb.den被修改过，
-            //而filtered_frame->pts使用原来的enc->time_base去求，看ffmpeg的float_pts注释，区别是精度不一样。
+            // 计算float_pts、filtered_frame->pts的值.
+            // 思路也不难:
+            // 1)若用户指定start_time，则解码后的帧的显示时间戳需要减去start_time。
+            // 例如本来3s显示该帧，假设用户start_time=1s，那么就应该在3-1=2s就显示该帧.
+            // 2)若没指定，则值不会变.
+            // 这两者求法是一样的，区别是float_pts用的tb.den被修改过，
+            // 而filtered_frame->pts使用原来的enc->time_base去求，看ffmpeg的float_pts注释，区别是精度不一样。
             if (filtered_frame->pts != AV_NOPTS_VALUE) {
-                int64_t start_time = (of->start_time == AV_NOPTS_VALUE) ? 0 : of->start_time;//用户是否指定起始时间
+                int64_t start_time = (of->start_time == AV_NOPTS_VALUE) ? 0 : of->start_time;// 用户是否指定起始时间
                 AVRational filter_tb = av_buffersink_get_time_base(filter);
                 AVRational tb = enc->time_base;
-                // 1）av_clip(): 用来限制参1最终落在0~16的范围.
+                // 1）av_clip(): 用来限制参1最终落在[0,16]的范围.
                 // 2）av_log2()(参考ffplay音频相关): 应该是对齐成2的n次方吧。
-                // 例如freq=8000，每秒30次，最终返回8.具体可以看源码是如何处理的。
-                // 大概估计是8k/30=266.6，2*2^7<266.7<2*2^8.然后向上取整，所以返回8。表达式是：av_log2(8000/30)=8;
-                // 44.1k/30=1470，2*2^9<1470<2*2^10.然后向上取整，所以返回10。表达式是：av_log2(44.1k/30)=10;
+                // 例如表达式是：av_log2(8000/30)=8;
+                // 大概估计是8k/30=266.6，2*2^7<266.7<2*2^8.然后向上取整，所以返回8。
+                // 表达式是：av_log2(44.1k/30)=10;
+                // 44.1k/30=1470，2*2^9<1470<2*2^10.然后向上取整，所以返回10。
                 int extra_bits = av_clip(29 - av_log2(tb.den), 0, 16);
+                //int extra_bits = av_clip(32 - av_log2(tb.den), 0, 16);// tyycode,改成32测试好像也没太大问题
 
-                tb.den <<= extra_bits;//留个疑问
+                tb.den <<= extra_bits;// 留个疑问
                 float_pts =
                     av_rescale_q(filtered_frame->pts, filter_tb, tb) -
-                    av_rescale_q(start_time, AV_TIME_BASE_Q, tb);//获取从开始到现在的时间差
-                float_pts /= 1 << extra_bits;//留个疑问
+                    av_rescale_q(start_time, AV_TIME_BASE_Q, tb);// 获取从开始到现在的时间差?
+                float_pts /= 1 << extra_bits;// 转回单位为filter_tb
                 // avoid exact midoints to reduce the chance of rounding differences, this can be removed in case the fps code is changed to work with integers
-                //(避免精确的中点以减少舍入差异的机会，这可以在FPS代码更改为使用整数时删除)
-                float_pts += FFSIGN(float_pts) * 1.0 / (1<<17);//FFSIGN宏很简单:就是取正负,但除以1<<17是啥意思?留个疑问
+                // (避免精确的中点以减少舍入差异的机会，这可以在FPS代码更改为使用整数时删除)
+                float_pts += FFSIGN(float_pts) * 1.0 / (1<<17);// FFSIGN宏很简单:就是取正负,但除以1<<17是啥意思?留个疑问
 
                 filtered_frame->pts =
                     av_rescale_q(filtered_frame->pts, filter_tb, enc->time_base) -
-                    av_rescale_q(start_time, AV_TIME_BASE_Q, enc->time_base);//filtered_frame->pts单位变了，变成enc->time_base
+                    av_rescale_q(start_time, AV_TIME_BASE_Q, enc->time_base);// filtered_frame->pts单位变了，变成enc->time_base
             }
+
+            // 到这里,float_pts的单位是filter_tb, filtered_frame->pts的单位是enc->time_base.一般两个tb是一样的.
 
             // 3.2 将读到的帧进行编码
             switch (av_buffersink_get_type(filter)) {
             case AVMEDIA_TYPE_VIDEO:
-                //用户没指定输出流的宽高比，会使用帧的宽高比给编码器的宽高比赋值
+                // 用户没指定输出流的宽高比，会使用帧的宽高比给编码器的宽高比赋值
                 if (!ost->frame_aspect_ratio.num)
                     enc->sample_aspect_ratio = filtered_frame->sample_aspect_ratio;
 
@@ -2276,7 +2362,7 @@ static void flush_encoders(void)
         if (enc->codec_type != AVMEDIA_TYPE_VIDEO && enc->codec_type != AVMEDIA_TYPE_AUDIO)
             continue;
 
-        // 2. 清空编码器
+        // 3. 清空编码器
         for (;;) {
             const char *desc = NULL;
             AVPacket pkt;
@@ -2293,12 +2379,14 @@ static void flush_encoders(void)
                 av_assert0(0);
             }
 
+            // 3.1 设置空包
             av_init_packet(&pkt);
             pkt.data = NULL;
             pkt.size = 0;
 
             update_benchmark(NULL);
 
+            // 3.2 冲刷编码器
             // flush 编码器的实际操作: 从编码器读取eagain, 那么一直往编码器发送空帧,直至遇到非eagain
             while ((ret = avcodec_receive_packet(enc, &pkt)) == AVERROR(EAGAIN)) {
                 ret = avcodec_send_frame(enc, NULL);
@@ -2310,6 +2398,7 @@ static void flush_encoders(void)
                 }
             }
 
+            // 3.3 处理avcodec_receive_packet()返回eagain以外的返回值
             update_benchmark("flush_%s %d.%d", desc, ost->file_index, ost->index);
             if (ret < 0 && ret != AVERROR_EOF) {
                 av_log(NULL, AV_LOG_FATAL, "%s encoding failed: %s\n",
@@ -2334,7 +2423,7 @@ static void flush_encoders(void)
                 continue;
             }
 
-            //没有遇到eof或者输出流没完成,那么继续将该包输出到输出url
+            // 没有遇到eof或者输出流没完成,那么继续将该包输出到输出url
             av_packet_rescale_ts(&pkt, enc->time_base, ost->mux_timebase);
             pkt_size = pkt.size;
             output_packet(of, &pkt, ost, 0);
@@ -2521,11 +2610,11 @@ int guess_input_channel_layout(InputStream *ist)
 static void check_decode_result(InputStream *ist, int *got_output, int ret)
 {
     // 1. 保存成功解码一帧的次数,以及解码失败的次数.
-    /*分析got_output、ret的情况:
+    /* 分析got_output、ret的情况:
      * 1)当got_output=1时:
      *  1.1)ret=0(大于0也一样),那么表示decode()成功解码一帧;次数保存在decode_error_stat[0];
      *  1.2)ret=负数,不存在.因为decode(),got_output=1时返回值必定是0.所以不考虑.
-     * 2)当当got_output=0时:
+     * 2)当got_output=0时:
      *  2.1)ret=0(大于0也一样),不会进入该if,所以不考虑.
      *  2.2)ret=负数,那么表示解码失败.次数保存在decode_error_stat[1];
     */
@@ -2853,19 +2942,19 @@ static int decode_audio(InputStream *ist, AVPacket *pkt, int *got_output,
     // 4. 使用样本数+采样率预测next_pts、next_dts
     /* increment next_dts to use for the case where the input stream does not
        have timestamps or there are multiple frames in the packet */
-    //(增加next_dts以用于输入流没有时间戳或包中有多个帧的情况)
+    // (增加next_dts以用于输入流没有时间戳或包中有多个帧的情况)
     ist->next_pts += ((int64_t)AV_TIME_BASE * decoded_frame->nb_samples) /
-                     avctx->sample_rate;//例如样本数是1024,采样率是44.1k,那么该帧时长是0.023s.乘以AV_TIME_BASE是转成微秒
+                     avctx->sample_rate;// 例如样本数是1024,采样率是44.1k,那么该帧时长是0.023s.乘以AV_TIME_BASE是转成微秒
     ist->next_dts += ((int64_t)AV_TIME_BASE * decoded_frame->nb_samples) /
                      avctx->sample_rate;
 
     // 5. 获取解码帧的pts和tb
-    if (decoded_frame->pts != AV_NOPTS_VALUE) {//解码帧pts有效在不处理
+    if (decoded_frame->pts != AV_NOPTS_VALUE) {// 解码帧pts有效
         decoded_frame_tb   = ist->st->time_base;
-    } else if (pkt && pkt->pts != AV_NOPTS_VALUE) {//解码帧pts无效优先参考pkt
+    } else if (pkt && pkt->pts != AV_NOPTS_VALUE) {// 解码帧pts无效优先参考pkt
         decoded_frame->pts = pkt->pts;
         decoded_frame_tb   = ist->st->time_base;
-    }else {//否则参考流的dts
+    }else {// 否则参考流的dts
         decoded_frame->pts = ist->dts;
         decoded_frame_tb   = AV_TIME_BASE_Q;
     }
@@ -2892,11 +2981,19 @@ static int decode_audio(InputStream *ist, AVPacket *pkt, int *got_output,
                                               (AVRational){1, avctx->sample_rate}, decoded_frame->nb_samples, &ist->filter_in_rescale_delta_last,
                                               (AVRational){1, avctx->sample_rate});
 
+#ifdef TYYCODE_TIMESTAMP_DECODE
+    static int tyycode = 1;
+    if(tyycode == 1){
+        mydebug(NULL, AV_LOG_INFO, "audio decode first frame success...\n");
+        tyycode = 0;
+    }
+#endif
+
     // 7. 将解码帧发送到过滤器处理
     ist->nb_samples = decoded_frame->nb_samples;// 保存最近一次解码帧的样本数.
     err = send_frame_to_filters(ist, decoded_frame);
 
-    av_frame_unref(ist->filter_frame);//这里只是解引用filter_frame、decoded_frame,并未释放内存
+    av_frame_unref(ist->filter_frame);// 这里只是解引用filter_frame、decoded_frame,并未释放内存
     av_frame_unref(decoded_frame);
     return err < 0 ? err : ret;
 }
@@ -2936,10 +3033,10 @@ static int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_
 
     // 2. 重置pkt的dts
     if (ist->dts != AV_NOPTS_VALUE)
-        dts = av_rescale_q(ist->dts, AV_TIME_BASE_Q, ist->st->time_base);//转成ist->st->time_base单位的dts
+        dts = av_rescale_q(ist->dts, AV_TIME_BASE_Q, ist->st->time_base);
     if (pkt) {
         avpkt = *pkt;
-        //这里看到pkt->dts的值和单位是被改变的,值改成ist->dts, 单位改成ist->st->time_base
+        //这里看到pkt->dts的值是被重置的
         avpkt.dts = dts; // ffmpeg.c probably shouldn't do this(FFmpeg.c可能不应该这样做)
     }
 
@@ -3017,19 +3114,19 @@ static int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_
 
     // 8. best_effort_timestamp和pts的相关处理
     // 8.1 默认从解码后的一帧获取best_effort_timestamp(ffplay是走这种方式处理解码后的pts)
-    best_effort_timestamp= decoded_frame->best_effort_timestamp;//使用各种启发式算法估计帧时间戳，单位为流的时基。
-    *duration_pts = decoded_frame->pkt_duration;//传出参数,保存该帧的显示时长,
+    best_effort_timestamp= decoded_frame->best_effort_timestamp;// 使用各种启发式算法估计帧时间戳，单位为流的时基。
+    *duration_pts = decoded_frame->pkt_duration;// 传出参数,保存该帧的显示时长,
 
     // 8.2 若输入文件指定了-r选项,则从cfr_next_pts获取best_effort_timestamp
-    if (ist->framerate.num)//输入文件的-r 25选项,注与输出文件的-r选项是不一样的.
-        best_effort_timestamp = ist->cfr_next_pts++;//cfr_next_pts默认值是0
+    if (ist->framerate.num)// 输入文件的-r 25选项,注与输出文件的-r选项是不一样的.
+        best_effort_timestamp = ist->cfr_next_pts++;// cfr_next_pts默认值是0
 
     // 8.3 若遇到eof 且 上面两步都没拿到值 且 dts_buffer有dts,则从dts_buffer数组获取best_effort_timestamp.
-    //遇到eof 且 best_effort_timestamp没有值 且eof时在dts_buffer数组存有时间戳, 则取该数组首个元素给其赋值.
+    // 遇到eof 且 best_effort_timestamp没有值 且eof时在dts_buffer数组存有时间戳, 则取该数组首个元素给其赋值.
     if (eof && best_effort_timestamp == AV_NOPTS_VALUE && ist->nb_dts_buffer > 0) {
         best_effort_timestamp = ist->dts_buffer[0];
 
-        //将数组元素往前移,覆盖首个元素.
+        // 将数组元素往前移,覆盖首个元素.
         for (i = 0; i < ist->nb_dts_buffer - 1; i++)
             ist->dts_buffer[i] = ist->dts_buffer[i + 1];
         ist->nb_dts_buffer--;
@@ -3037,15 +3134,15 @@ static int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_
 
     // 8.4 保存decoded_frame->pts, ist->next_pts 以及 ist->pts.
     if(best_effort_timestamp != AV_NOPTS_VALUE) {
-        //将best_effort_timestamp赋值给decoded_frame->pts,并转单位后赋值给ts变量
+        // 将best_effort_timestamp赋值给decoded_frame->pts,并转单位后赋值给ts变量
         int64_t ts = av_rescale_q(decoded_frame->pts = best_effort_timestamp, ist->st->time_base, AV_TIME_BASE_Q);
 
         if (ts != AV_NOPTS_VALUE)
-            ist->next_pts = ist->pts = ts;//这里next_pts与pts都保存当前解码帧的pts. 猜想next_pts也保存当前pts原因应该是,
-                                          //当出现解码帧的pts出错时,可以使用上一次正常解码的pts加上duration来估算出错的pts.后续可以验证一下.
+            ist->next_pts = ist->pts = ts;// 这里next_pts与pts都保存当前解码帧的pts. 猜想next_pts也保存当前pts原因应该是,
+                                          // 当出现解码帧的pts出错时,可以使用上一次正常解码的pts加上duration来估算出错的pts.后续可以验证一下.
     }
 
-    //debug解码后的相关时间戳
+    // debug解码后的相关时间戳
     if (debug_ts) {
         av_log(NULL, AV_LOG_INFO, "decoder -> ist_index:%d type:video "
                "frame_pts:%s frame_pts_time:%s best_effort_ts:%"PRId64" best_effort_ts_time:%s keyframe:%d frame_type:%d time_base:%d/%d\n",
@@ -3057,8 +3154,16 @@ static int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_
                ist->st->time_base.num, ist->st->time_base.den);
     }
 
-    if (ist->st->sample_aspect_ratio.num)//样本比例.正常不会进来
+    if (ist->st->sample_aspect_ratio.num)// 样本比例.正常不会进来
         decoded_frame->sample_aspect_ratio = ist->st->sample_aspect_ratio;
+
+#ifdef TYYCODE_TIMESTAMP_DECODE
+    static int tyycode = 1;
+    if(tyycode == 1){
+        mydebug(NULL, AV_LOG_INFO, "video decode first frame success...\n");
+        tyycode = 0;
+    }
+#endif
 
     // 9. 发送视频解码帧到输入过滤器(视频的是: buffer).
     err = send_frame_to_filters(ist, decoded_frame);
@@ -3186,8 +3291,8 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
     // 1. 判断是否是第一次进来的时间戳，给InputStream的dts/pts赋值.
     //转码时,ist->dts参考has_b_frames; 不转码时优先参考pkt->pts,pkt->pts不存在则参考has_b_frames
     if (!ist->saw_first_ts) {
-        /* 求出has_b_frames缓存大小占用的时间.例如has_b_frames=2,avg_frame_rate={25,1},
-         * 乘以AV_TIME_BASE是转成成微秒,除以帧率这假设是25,2*1000000/25=80,000μs.
+        /* 求出has_b_frames缓存大小占用的时间.例如has_b_frames=2,avg_frame_rate={24000,1001},
+         * 乘以AV_TIME_BASE是转成微秒,2*1000000/(24000/1001)=83416μs.
          * has_b_frames: ffmpeg的注释是"解码器中帧重排序缓冲区的大小".
         */
         ist->dts = ist->st->avg_frame_rate.num ? - ist->dec_ctx->has_b_frames * AV_TIME_BASE / av_q2d(ist->st->avg_frame_rate) : 0;
@@ -3200,7 +3305,8 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
         ist->saw_first_ts = 1;
     }
 
-    // 2. 如果next_dts/next_pts为空,使用ist->dts/ist->pts给其赋值.一般是首次时会进来.
+    // 2. 当next_dts/next_pts无效,参考当前的ist->dts/ist->pts.
+    // 一般是首次或者计算next_dts/next_pts无效时会进来.
     if (ist->next_dts == AV_NOPTS_VALUE)
         ist->next_dts = ist->dts;
     if (ist->next_pts == AV_NOPTS_VALUE)
@@ -3216,7 +3322,7 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
         avpkt = *pkt;
     }
 
-    // 4. 不是flush解码器时, 对ist->next_dts/ist->dts, ist->next_pts/ist->pts的处理.
+    // 4. 不是flush解码器时(pkt->dts有效时), 对ist->next_dts/ist->dts, ist->next_pts/ist->pts的处理.
     if (pkt && pkt->dts != AV_NOPTS_VALUE) {
         ist->next_dts = ist->dts = av_rescale_q(pkt->dts, ist->st->time_base, AV_TIME_BASE_Q);
         // 非视频流 或者 视频流时不转码,ist->next_pts,ist->pts由ist->dts赋值;
@@ -3234,7 +3340,7 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
         int got_output = 0;
         int decode_failed = 0;
 
-        ist->pts = ist->next_pts;
+        ist->pts = ist->next_pts;// 这里的作用是为了处理一个pkt包含多帧的情况
         ist->dts = ist->next_dts;
 
         // 5.1 解码包
@@ -3250,32 +3356,32 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
                                    &decode_failed);
             // 预测next_dts
             if (!repeating || !pkt || got_output) {
-                if (pkt && pkt->duration) {//统计eof+正常解码一帧的dts,即pkt不为空的情况
+                if (pkt && pkt->duration) {// 统计eof+正常解码一帧的dts,即pkt不为空的情况
                     duration_dts = av_rescale_q(pkt->duration, ist->st->time_base, AV_TIME_BASE_Q);
-                } else if(ist->dec_ctx->framerate.num != 0 && ist->dec_ctx->framerate.den != 0) {//统计pkt=NULL即刷空包时的dts
-                    struct AVCodecParserContext *tyycode = av_stream_get_parser(ist->st);//一般是null
-                    //这里实际思路就是: 使用帧率去获取dts.
-                    //把下面ticks和ticks_per_frame去掉即可看出来.
+                } else if(ist->dec_ctx->framerate.num != 0 && ist->dec_ctx->framerate.den != 0) {// 统计pkt=NULL即刷空包时的dts
+                    struct AVCodecParserContext *tyycode = av_stream_get_parser(ist->st);// 一般是null
+                    // 这里实际思路就是: 使用帧率去获取dts.
+                    // 把下面ticks和ticks_per_frame约去即可看出来.
                     int ticks= av_stream_get_parser(ist->st) ? av_stream_get_parser(ist->st)->repeat_pict+1 : ist->dec_ctx->ticks_per_frame;
                     duration_dts = ((int64_t)AV_TIME_BASE * /* 转成微秒 */
                                     ist->dec_ctx->framerate.den * ticks) /
                                     ist->dec_ctx->framerate.num / ist->dec_ctx->ticks_per_frame;
-                                    //这里是连续除以num和ticks_per_frame，优先级从左到右.例如(1000000 * 1 * 2) / 25 / 2 = 80000/2=40000.
+                                    // 这里是连续除以num和ticks_per_frame，优先级从左到右.例如(1000000 * 1 * 2) / 25 / 2 = 80000/2=40000.
                 }
 
-                //next_dts指向下一个dts
+                // next_dts指向下一个dts,只要解码都会进来这里
                 if(ist->dts != AV_NOPTS_VALUE && duration_dts) {
                     ist->next_dts += duration_dts;
                 }else
                     ist->next_dts = AV_NOPTS_VALUE;
             }
 
-            //成功解码一帧,预测next_pts
+            // 预测next_pts,只有成功解码一帧,才会进来
             if (got_output) {
-                //可以看到,duration_pts非法时,参考duration_dts
                 if (duration_pts > 0) {
                     ist->next_pts += av_rescale_q(duration_pts, ist->st->time_base, AV_TIME_BASE_Q);
                 } else {
+                    // 加负的duration_dts有什么意义?
                     ist->next_pts += duration_dts;
                 }
             }
@@ -4260,21 +4366,21 @@ static int init_output_stream_encode(OutputStream *ost)
         break;
 
     case AVMEDIA_TYPE_VIDEO:
-        //通过帧率设置视频编码器的时间基.注意av_inv_q是分子分母调转然后返回.例如帧率={25,1}，那么返回时间基就是{1,25}
-        //视频编码器的时间基一般都是设为帧率的倒数,see https://blog.csdn.net/weixin_44517656/article/details/110355462
+        // 通过帧率设置视频编码器的时间基.注意av_inv_q是分子分母调转然后返回.例如帧率={25,1}，那么返回时间基就是{1,25}
+        // 视频编码器的时间基一般都是设为帧率的倒数,see https://blog.csdn.net/weixin_44517656/article/details/110355462
         init_encoder_time_base(ost, av_inv_q(ost->frame_rate));
 
-        //若编码器的时间基存在一个为0，则从过滤器中获取时间基
+        // 若编码器的时间基存在一个为0，则从过滤器中获取时间基
         if (!(enc_ctx->time_base.num && enc_ctx->time_base.den))
             enc_ctx->time_base = av_buffersink_get_time_base(ost->filter->filter);
 
-        /*检测帧率是否很大，因为上面讲过，编码器的时基就是帧率的倒数，若时基很小，说明帧率很大。
-        若帧率很大，会判断视频同步方法：若不是PASSTHROUGH，则会优先判断是否是auto，然后再判断是否是vscfr、cfr.
-        理解这里需要知道逻辑运算符的优先级，或运算是比与运算低的，具体看open_output_file()中-map=0的字幕流逻辑.*/
-        if (   av_q2d(enc_ctx->time_base) < 0.001 && video_sync_method != VSYNC_PASSTHROUGH/*1)时间基小于千分之一且video_sync_method!=0*/
-           && (video_sync_method == VSYNC_CFR /*4)视频同步方法是cfr*/
-               || video_sync_method == VSYNC_VSCFR || /*3)视频同步方法是vscfr*/
-               (video_sync_method == VSYNC_AUTO && !(oc->oformat->flags & AVFMT_VARIABLE_FPS))))/*2)视频同步方法是自动且不包含该宏*/
+        /* 检测帧率是否很大，因为上面讲过，编码器的时基就是帧率的倒数，若时基很小，说明帧率很大。
+         * 若帧率很大，会判断视频同步方法：若不是PASSTHROUGH，则会优先判断是否是auto，然后再判断是否是vscfr、cfr.
+         * 理解这里需要知道逻辑运算符的优先级，或运算是比与运算低的，具体看open_output_file()中-map=0的字幕流逻辑. */
+        if (   av_q2d(enc_ctx->time_base) < 0.001 && video_sync_method != VSYNC_PASSTHROUGH /* 1)时间基小于千分之一且video_sync_method!=0 */
+           && (video_sync_method == VSYNC_CFR /* 4)视频同步方法是cfr */
+               || video_sync_method == VSYNC_VSCFR || /* 3)视频同步方法是vscfr */
+               (video_sync_method == VSYNC_AUTO && !(oc->oformat->flags & AVFMT_VARIABLE_FPS))))/* 2)视频同步方法是自动且不包含该宏 */
         {
             av_log(oc, AV_LOG_WARNING, "Frame rate very high for a muxer not efficiently supporting it.\n"
                                        "Please consider specifying a lower framerate, a different muxer or -vsync 2\n");
@@ -5064,7 +5170,7 @@ static int need_output(void)
 {
     int i;
 
-    /*1.遍历所有输出流：
+    /* 1.遍历所有输出流：
      * 1）若某个流已经完成 或者 该流>=用户指定的输出文件大小限制，那么不处理该流；
      * 2）否则，则去判断 该输出流的帧数 是否>= 用户指定的最大帧数，若>=，则会把 包含该输出流的文件的所有流 都标记为完成.*/
     for (i = 0; i < nb_output_streams; i++) {
@@ -5124,7 +5230,7 @@ static OutputStream *choose_output(void)
             return ost;
 
         /* 2.依赖输出流的st->cur_dts(opts)去选，遍历所有输出流，每次只
-         * 选ost->st->cur_dts值最小的输出流进行返回*/
+         * 选ost->st->cur_dts值最小的输出流进行返回 */
         if (!ost->finished && opts < opts_min) {
             opts_min = opts;
             ost_min  = ost->unavailable ? NULL : ost;
@@ -5701,7 +5807,7 @@ static int process_input(int file_index)
             // 若输入流是需要解码的,则需要刷空包,以清除解码器剩余的包.
             ist = input_streams[ifile->ist_index + i];
             if (ist->decoding_needed) {
-                ret = process_input_packet(ist, NULL, 0);//参3传0代表向过滤器发送eof,因为这里是真正结束了
+                ret = process_input_packet(ist, NULL, 0);// 参3传0代表向过滤器发送eof,因为这里是真正结束了
                 if (ret>0)// 这里看到,会先清理完解码器后,再往下清理输出流.
                     return 0;
             }

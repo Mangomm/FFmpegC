@@ -47,16 +47,20 @@
 #include "libswresample/swresample.h"
 
 #define VSYNC_AUTO       -1
-#define VSYNC_PASSTHROUGH 0
-#define VSYNC_CFR         1
+#define VSYNC_PASSTHROUGH 0         // 透传?
+#define VSYNC_CFR         1         // 固定帧率?
 #define VSYNC_VFR         2         // 可变帧率
-#define VSYNC_VSCFR       0xfe
+#define VSYNC_VSCFR       0xfe      // video stream cfr. 1)固定帧率 且 只有一个输入视频流 && 输入偏移地址是0; 2)固定帧率且copy_ts=1时会使用?
 #define VSYNC_DROP        0xff      // 音视频同步时，允许drop帧？
 
 #define MAX_STREAMS 1024    /* arbitrary sanity check value */
 
-#define TYYCODE_TIMESTAMP_DEMUXER   // 用于debug解复用的时间戳
 #define mydebug av_log
+#define TYYCODE_TIMESTAMP_DEMUXER   // 用于debug解复用的时间戳
+#define TYYCODE_TIMESTAMP_DECODE
+#define TYYCODE_TIMESTAMP_ENCODER
+#define TYYCODE_TIMESTAMP_MUXER
+
 
 enum HWAccelID {
     HWACCEL_NONE = 0,
@@ -104,7 +108,7 @@ typedef struct OptionsContext {
     int seek_timestamp;
     const char *format;                         // -f选项.注：多个-f选项时，只会取最后一个，例如ffmpeg xxx -f s16le -f flv xxx，那么format就是flv
 
-    SpecifierOpt *codec_names;                  //offset:40,-vcodec
+    SpecifierOpt *codec_names;                  //offset:40,-c,-codec,-vcodec
     int        nb_codec_names;
     SpecifierOpt *audio_channels;
     int        nb_audio_channels;
@@ -428,7 +432,7 @@ typedef struct InputFile {
                              at the moment when looping happens(循环发生时文件中最长流的实际持续时间,即stream_loop选项) */
                           // 该输入文件中时长为最长的流的duration
     AVRational time_base; /* time base of the duration */ // 上面duration字段的时基
-    int64_t input_ts_offset;
+    int64_t input_ts_offset;  // -itsoffset选项,设置输入时间戳偏移
 
     int64_t ts_offset;    // 时间戳偏移地址,目前理解意思为与0相差的偏移地址,所以一般是负数值.
                           // 与input_ts_offset、copy_ts、start_at_zero、-ss选项有关,都没加默认是0.
@@ -484,19 +488,20 @@ typedef struct OutputStream {
 
     AVStream *st;            /* stream in the output file */
     int encoding_needed;     /* true if encoding needed for this stream *///是否需要编码；0=不需要 1=需要.一般由!stream_copy得到
-    int frame_number;        // 已经编码的帧数 或者 叫已经写帧的数量? 控制台就是打印这个值
+    int frame_number;        // 已经写帧的数量. 控制台就是打印这个值
     /* input pts and corresponding output pts
        for A/V sync */
     struct InputStream *sync_ist; /* input stream to sync against */
     int64_t sync_opts;       /* output frame counter, could be changed to some true timestamp */ // FIXME look at frame_number
                              /* 输出帧计数器，可以更改为一些真实的时间戳. FIXME：查看frame_number */
-                             // 音频时:代表下一帧的pts(see do_audio_out()).
+                             // 视频时: 代表下一帧的pts(see do_video_out()),不过是以自增的方式存储,除以帧率(保存在编码器时基)即得到对应的pts.
+                             // 音频时:代表下一帧的pts(see do_audio_out()),不过是以采样点的形式存储,除以采样率即得到对应的pts.
 
     /* pts of the first frame encoded for this stream, used for limiting
      * recording time */
     int64_t first_pts;
     /* dts of the last packet sent to the muxer */
-    int64_t last_mux_dts;       // 发送到muxer的最后一个包的DTS，即最近有效的dts
+    int64_t last_mux_dts;       // 发送到muxer的最后一个包的DTS，即最近有效的dts,单位ost->st->time_base
     // the timebase of the packets sent to the muxer
     AVRational mux_timebase;    // 发送到muxer的数据包的时间基准
     AVRational enc_timebase;    // 由OptionsContext.enc_time_bases参数解析得到
@@ -642,7 +647,7 @@ extern float dts_error_threshold;
 
 extern int audio_volume;                    // -vol选项,默认256
 extern int audio_sync_method;               // -async选项,音频同步方法.默认0
-extern int video_sync_method;
+extern int video_sync_method;               // -vsync选项,视频同步方法,默认-1,表示自动
 extern float frame_drop_threshold;
 extern int do_benchmark;
 extern int do_benchmark_all;                // -benchmark_all选项，默认0
