@@ -1827,12 +1827,12 @@ static int reap_filters(int flush)
             }
 
             // 计算float_pts、filtered_frame->pts的值.
-            // 思路也不难:
-            // 1)若用户指定start_time，则解码后的帧的显示时间戳需要减去start_time。
-            // 例如本来3s显示该帧，假设用户start_time=1s，那么就应该在3-1=2s就显示该帧.
-            // 2)若没指定，则值不会变.
-            // 这两者求法是一样的，区别是float_pts用的tb.den被修改过，
-            // 而filtered_frame->pts使用原来的enc->time_base去求，看ffmpeg的float_pts注释，区别是精度不一样。
+            /* 思路也不难:
+             * 1)若用户指定start_time，则解码后的帧的显示时间戳需要减去start_time。
+             * 例如本来3s显示该帧，假设用户start_time=1s，那么就应该在3-1=2s就显示该帧.
+             * 2)若没指定，则值不会变.
+             * 这两者求法是一样的，区别是float_pts用的tb.den被修改过，
+             * 而filtered_frame->pts使用原来的enc->time_base去求，看ffmpeg的float_pts注释，区别是精度不一样. */
             if (filtered_frame->pts != AV_NOPTS_VALUE) {
                 int64_t start_time = (of->start_time == AV_NOPTS_VALUE) ? 0 : of->start_time;// 用户是否指定起始时间
                 AVRational filter_tb = av_buffersink_get_time_base(filter);
