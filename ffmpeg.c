@@ -764,7 +764,13 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
             av_packet_unref(pkt);
             return;
         }
+
         ost->frame_number++;// 视频流需要编码时，不会在这里计数，会在do_video_out()单独计数
+
+#ifdef TYYCODE_TIMESTAMP_MUXER
+        mydebug(NULL, AV_LOG_INFO, "write_packet(), tpye: %s, ost->frame_number: %d\n",
+                av_get_media_type_string(st->codecpar->codec_type), ost->frame_number);
+#endif
     }
 
     /* 2.没有写头或者写头失败，先将包缓存在复用队列，然后返回，不会调用到写帧函数 */
@@ -1122,6 +1128,14 @@ static void do_audio_out(OutputFile *of, OutputStream *ost,
     if (ret < 0)
         goto error;
 
+#ifdef TYYCODE_TIMESTAMP_ENCODER
+    // 统计输入到音频编码器的帧数.根据这里可以指定音频输入帧数!=输出包数.
+    // 例如输入帧是1299,而输出包是1300
+    static int inputPktNum = 0;
+    inputPktNum++;
+    mydebug(NULL, AV_LOG_INFO, "do_audio_out(), inputPktNum: %d\n", inputPktNum);
+#endif
+
     // 6. 循环获取编码后的帧,并进行写帧
     while (1) {
         // 6.1 获取编码后的帧
@@ -1315,7 +1329,7 @@ static void do_video_out(OutputFile *of,
     } else {
         /* delta0是输入帧(next_picture)与输出帧之间的“漂移” */
         delta0 = sync_ipts - ost->sync_opts; // delta0 is the "drift" between the input frame (next_picture) and where it would fall in the output.
-        delta  = delta0 + duration;// 此次输入帧next_picture应显示的时长?
+        delta  = delta0 + duration;// 此次输入帧next_picture应显示的时长, 用于判断sync_ipts与ost->sync_opts之差是否在一帧以内
 
 #ifdef TYYCODE_TIMESTAMP_ENCODER
         // 不要用av_ts2str()宏打印浮点数,会导致精度缺少
@@ -1363,7 +1377,7 @@ static void do_video_out(OutputFile *of,
 
         // sync_ipts < sync_opts时的控制处理
         if (delta0 < 0 && /* sync_ipts小于ost->sync_opts */
-            delta > 0 &&  /* delta0此时为负，而根据上面delta的计算，此时delta0 + duration需要是一个正数 */
+            delta > 0 &&  /* 表示落后一帧以内. delta0此时为负，而根据上面delta的计算，此时delta0 + duration需要是一个正数 */
             format_video_sync != VSYNC_PASSTHROUGH &&
             format_video_sync != VSYNC_DROP) {
             if (delta0 < -0.6) {
@@ -1650,6 +1664,9 @@ static void do_video_out(OutputFile *of,
         /* 对于视频，输入的帧数=输出的包数。但是可能会有重新排序，所以我们不能在编码器flush时丢弃帧，
          * 我们需要在它们进入编码器之前，在这里限制它们. */
         ost->frame_number++;
+#ifdef TYYCODE_TIMESTAMP_ENCODER
+        mydebug(NULL, AV_LOG_INFO, "do_video_out(), ost->frame_number: %d\n", ost->frame_number);
+#endif
 
         //打印视频相关信息，vstats_filename默认是NULL，默认不会进来
         if (vstats_filename && frame_size)
@@ -1801,7 +1818,7 @@ static int reap_filters(int flush)
         }
         filtered_frame = ost->filtered_frame;
 
-        // 3. 从过滤器中获取处理后的帧,然后进行编码.
+        // 3. 循环从过滤器中获取处理后的帧,然后进行编码.
         while (1) {
             double float_pts = AV_NOPTS_VALUE; // this is identical to filtered_frame.pts but with higher precision
                                                // 这与filtered_frame.pts相同，但精度更高
@@ -1826,43 +1843,50 @@ static int reap_filters(int flush)
                 continue;
             }
 
-            // 计算float_pts、filtered_frame->pts的值.
+            // 3.2 计算float_pts、filtered_frame->pts的值.
             /* 思路也不难:
-             * 1)若用户指定start_time，则解码后的帧的显示时间戳需要减去start_time。
+             * 1)若用户指定start_time，则解码后的帧的显示时间戳需要减去start_time，并且增加精度。
              * 例如本来3s显示该帧，假设用户start_time=1s，那么就应该在3-1=2s就显示该帧.
-             * 2)若没指定，则值不会变.
+             * 2)若没指定，start_time=0，只会增加精度.
              * 这两者求法是一样的，区别是float_pts用的tb.den被修改过，
              * 而filtered_frame->pts使用原来的enc->time_base去求，看ffmpeg的float_pts注释，区别是精度不一样. */
             if (filtered_frame->pts != AV_NOPTS_VALUE) {
                 int64_t start_time = (of->start_time == AV_NOPTS_VALUE) ? 0 : of->start_time;// 用户是否指定起始时间
                 AVRational filter_tb = av_buffersink_get_time_base(filter);
                 AVRational tb = enc->time_base;
+                int tyycode = av_log2(tb.den);
+                // 3.2.1 扩大分母
                 // 1）av_clip(): 用来限制参1最终落在[0,16]的范围.
-                // 2）av_log2()(参考ffplay音频相关): 应该是对齐成2的n次方吧。
-                // 例如表达式是：av_log2(8000/30)=8;
-                // 大概估计是8k/30=266.6，2*2^7<266.7<2*2^8.然后向上取整，所以返回8。
-                // 表达式是：av_log2(44.1k/30)=10;
-                // 44.1k/30=1470，2*2^9<1470<2*2^10.然后向上取整，所以返回10。
+                // 2）av_log2()(参考ffplay音频相关): 应该类似C++的log2()函数返回数字的以2为底的对数。
+                // 例如表达式是：av_log2(48000)=15;
+                // 大概估计是2^x=48000, 2^15(32768)<48000<2^16(65536). x=15
+                // av_log2(25)=4;
+                // 2^x=25, 2^4<25<2^5. 所以x=4.   貌似返回的是小的次方值
                 int extra_bits = av_clip(29 - av_log2(tb.den), 0, 16);
                 //int extra_bits = av_clip(32 - av_log2(tb.den), 0, 16);// tyycode,改成32测试好像也没太大问题
 
-                tb.den <<= extra_bits;// 留个疑问
+                tb.den <<= extra_bits;// 扩大分母,为了下面转换float_pts时,得到精度更大的值.例如从25变成1638400
+
+                // 3.2.2 转换精度
                 float_pts =
                     av_rescale_q(filtered_frame->pts, filter_tb, tb) -
-                    av_rescale_q(start_time, AV_TIME_BASE_Q, tb);// 获取从开始到现在的时间差?
-                float_pts /= 1 << extra_bits;// 转回单位为filter_tb
+                    av_rescale_q(start_time, AV_TIME_BASE_Q, tb);
+
+                // 3.2.3 转换单位为enc->time_base
+                float_pts /= 1 << extra_bits;
                 // avoid exact midoints to reduce the chance of rounding differences, this can be removed in case the fps code is changed to work with integers
                 // (避免精确的中点以减少舍入差异的机会，这可以在FPS代码更改为使用整数时删除)
                 float_pts += FFSIGN(float_pts) * 1.0 / (1<<17);// FFSIGN宏很简单:就是取正负,但除以1<<17是啥意思?留个疑问
 
+                // 3.2.4 计算filtered_frame->pts的值。主要是转单位为enc->time_base
                 filtered_frame->pts =
                     av_rescale_q(filtered_frame->pts, filter_tb, enc->time_base) -
-                    av_rescale_q(start_time, AV_TIME_BASE_Q, enc->time_base);// filtered_frame->pts单位变了，变成enc->time_base
+                    av_rescale_q(start_time, AV_TIME_BASE_Q, enc->time_base);
             }
 
             // 到这里,float_pts的单位是filter_tb, filtered_frame->pts的单位是enc->time_base.一般两个tb是一样的.
 
-            // 3.2 将读到的帧进行编码
+            // 3.3 将读到的帧进行编码
             switch (av_buffersink_get_type(filter)) {
             case AVMEDIA_TYPE_VIDEO:
                 // 用户没指定输出流的宽高比，会使用帧的宽高比给编码器的宽高比赋值
@@ -3115,7 +3139,7 @@ static int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_
     // 8. best_effort_timestamp和pts的相关处理
     // 8.1 默认从解码后的一帧获取best_effort_timestamp(ffplay是走这种方式处理解码后的pts)
     best_effort_timestamp= decoded_frame->best_effort_timestamp;// 使用各种启发式算法估计帧时间戳，单位为流的时基。
-    *duration_pts = decoded_frame->pkt_duration;// 传出参数,保存该帧的显示时长,
+    *duration_pts = decoded_frame->pkt_duration;// 传出参数,保存该帧的显示时长
 
     // 8.2 若输入文件指定了-r选项,则从cfr_next_pts获取best_effort_timestamp
     if (ist->framerate.num)// 输入文件的-r 25选项,注与输出文件的-r选项是不一样的.
@@ -3138,8 +3162,7 @@ static int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_
         int64_t ts = av_rescale_q(decoded_frame->pts = best_effort_timestamp, ist->st->time_base, AV_TIME_BASE_Q);
 
         if (ts != AV_NOPTS_VALUE)
-            ist->next_pts = ist->pts = ts;// 这里next_pts与pts都保存当前解码帧的pts. 猜想next_pts也保存当前pts原因应该是,
-                                          // 当出现解码帧的pts出错时,可以使用上一次正常解码的pts加上duration来估算出错的pts.后续可以验证一下.
+            ist->next_pts = ist->pts = ts;// 这里next_pts与pts都保存当前解码帧的pts. 会在后续加上duration来预测下一帧的pts.
     }
 
     // debug解码后的相关时间戳
@@ -3340,8 +3363,28 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
         int got_output = 0;
         int decode_failed = 0;
 
-        ist->pts = ist->next_pts;// 这里的作用是为了处理一个pkt包含多帧的情况
+        // 这里的作用是为了while的下一次循环时,ist->pts,ist->dts的值可以更新为下一帧的值.
+        ist->pts = ist->next_pts;
         ist->dts = ist->next_dts;
+
+#ifdef TYYCODE_TIMESTAMP_DECODE
+        // 查看解码前的详细的时间戳.主要看ist->pts/ist->dts以及ist->next_pts/ist->next_dts的变化.
+        // 因为pkt.pts/pkt.dts基本是没变的.
+        mydebug(NULL, AV_LOG_INFO, "decoder before, ist_index:%d type:%s "
+               "dts:%s dts_time:%s "
+               "pts:%s pts_time:%s "
+               "next_dts:%s next_dts_time:%s "
+               "next_pts:%s next_pts_time:%s "
+               "pkt_pts:%s pkt_pts_time:%s "
+               "pkt_dts:%s pkt_dts_time:%s\n",
+               pkt != NULL ? input_files[ist->file_index]->ist_index + pkt->stream_index : -1, av_get_media_type_string(ist->dec_ctx->codec_type),
+               av_ts2str(ist->dts), av_ts2timestr(ist->dts, &AV_TIME_BASE_Q),
+               av_ts2str(ist->pts), av_ts2timestr(ist->pts, &AV_TIME_BASE_Q),
+               av_ts2str(ist->next_dts), av_ts2timestr(ist->next_dts, &AV_TIME_BASE_Q),
+               av_ts2str(ist->next_pts), av_ts2timestr(ist->next_pts, &AV_TIME_BASE_Q),
+               pkt != NULL ? av_ts2str(pkt->pts) : "null", pkt != NULL ? av_ts2timestr(pkt->pts, &ist->st->time_base) : "null",
+               pkt != NULL ? av_ts2str(pkt->dts) : "null", pkt != NULL ? av_ts2timestr(pkt->dts, &ist->st->time_base) : "null");
+#endif
 
         // 5.1 解码包
         switch (ist->dec_ctx->codec_type) {
@@ -3441,9 +3484,7 @@ static int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eo
         if (!pkt)
             break;
 
-        repeating = 1;// 1)用于标记该pkt已经发送到解码器解码过, 下一次while循环应该传NULL进行解码;
-                      // 2)当是视频时(字幕音频忽略),若传NULL还能拿到解码帧(got_output=1),说明该pkt可以输出多个帧,
-                      // 所以视频时需要进入预测dts的逻辑,这就是if (!repeating || !pkt || got_output)需要或上got_output的意义.
+        repeating = 1;
     }//<== while (ist->decoding_needed) end ==>
 
     /* after flushing, send an EOF on all the filter inputs attached to the stream(冲洗后，对附加到流的所有过滤器输入发送EOF) */

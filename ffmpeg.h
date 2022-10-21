@@ -48,8 +48,8 @@
 
 #define VSYNC_AUTO       -1
 #define VSYNC_PASSTHROUGH 0         // 透传?
-#define VSYNC_CFR         1         // 固定帧率?
-#define VSYNC_VFR         2         // 可变帧率
+#define VSYNC_CFR         1         // 固定帧率(Const Frame-Rate).
+#define VSYNC_VFR         2         // 可变帧率(Variable Frame-Rate)
 #define VSYNC_VSCFR       0xfe      // video stream cfr. 1)固定帧率 且 只有一个输入视频流 && 输入偏移地址是0; 2)固定帧率且copy_ts=1时会使用?
 #define VSYNC_DROP        0xff      // 音视频同步时，允许drop帧？
 
@@ -489,6 +489,8 @@ typedef struct OutputStream {
     AVStream *st;            /* stream in the output file */
     int encoding_needed;     /* true if encoding needed for this stream *///是否需要编码；0=不需要 1=需要.一般由!stream_copy得到
     int frame_number;        // 已经写帧的数量. 控制台就是打印这个值
+                             // 视频:在do_video_out()统计写帧的个数;音频:在write_packet()统计写帧的个数;
+
     /* input pts and corresponding output pts
        for A/V sync */
     struct InputStream *sync_ist; /* input stream to sync against */
