@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This file is part of FFmpeg.
  *
  * FFmpeg is free software; you can redistribute it and/or
@@ -25,7 +25,7 @@
 static int nb_hw_devices;           // 用户电脑支持的硬件设备数
 static HWDevice **hw_devices;       // 用户电脑支持的硬件设备数组
 
-///该函数的注解可能不太准确，不过意思是这样，因为笔者还没详细debug硬件相关的代码
+/// 该函数的注解可能不太准确，不过意思是这样，因为笔者还没详细debug硬件相关的代码
 /**
  * @brief 从用户支持的硬件设备列表中，获取指定的硬件设备。
  * @param type 指定硬件设备的类型

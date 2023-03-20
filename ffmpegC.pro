@@ -44,6 +44,8 @@ win32 {
     INCLUDEPATH += $$PWD/ffmpeg-4.2/include
     INCLUDEPATH += $$PWD/SDL2/include
     INCLUDEPATH += $$PWD/spdlog
+    # msvc编译器用到,否则会报找不到stdatomic.h错误
+    INCLUDEPATH += $$PWD/ffmpeg-4.2/include/compat/atomics/win32
 
     LIBS += $$PWD/ffmpeg-4.2/lib/x64/avformat.lib   \
             $$PWD/ffmpeg-4.2/lib/x64/avcodec.lib    \

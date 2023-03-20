@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Various utilities for command line tools
  * copyright (c) 2003 Fabrice Bellard
  *
@@ -630,7 +630,7 @@ void *grow_array(void *array, int elem_size, int *size, int new_size);
 #define GET_CODEC_NAME(id)\
     const char *name = avcodec_descriptor_get(id)->name;
 
-//返回sample_fmt的名称，如果无法识别sample_fmt，则返回NULL。
+// 返回sample_fmt的名称，如果无法识别sample_fmt，则返回NULL。
 #define GET_SAMPLE_FMT_NAME(sample_fmt)\
     const char *name = av_get_sample_fmt_name(sample_fmt)
 

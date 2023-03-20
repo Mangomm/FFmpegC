@@ -1,4 +1,4 @@
-/*
+﻿/*
  * ffmpeg filter configuration
  *
  * This file is part of FFmpeg.
@@ -275,43 +275,43 @@ DEF_CHOOSE_FORMAT(channel_layouts, uint64_t, channel_layout, channel_layouts, 0,
 */
 int init_simple_filtergraph(InputStream *ist, OutputStream *ost)
 {
-    /*1.给封装好的系统过滤器FilterGraph开辟内存*/
+    /* 1.给封装好的系统过滤器FilterGraph开辟内存 */
     FilterGraph *fg = av_mallocz(sizeof(*fg));
 
     if (!fg)
         exit_program(1);
     fg->index = nb_filtergraphs;
 
-    /*2.开辟一个OutputFilter *指针和开辟一个OutputFilter结构体，
-     并让该指针指向该结构体，然后对该结构体进行相关赋值*/
-    GROW_ARRAY(fg->outputs, fg->nb_outputs);//开辟OutputFilter *指针
+    /* 2.开辟一个OutputFilter *指针和开辟一个OutputFilter结构体，
+     并让该指针指向该结构体，然后对该结构体进行相关赋值 */
+    GROW_ARRAY(fg->outputs, fg->nb_outputs);// 开辟OutputFilter *指针
     if (!(fg->outputs[0] = av_mallocz(sizeof(*fg->outputs[0]))))// 开辟一个OutputFilter结构体
         exit_program(1);
-    fg->outputs[0]->ost   = ost;//保存输出流
-    fg->outputs[0]->graph = fg;//保存该系统过滤器
+    fg->outputs[0]->ost   = ost;// 保存输出流
+    fg->outputs[0]->graph = fg;// 保存该系统过滤器
     fg->outputs[0]->format = -1;
 
-    ost->filter = fg->outputs[0];//同样ost中也会保存该OutputFilter.(建议画图容易理解)
+    ost->filter = fg->outputs[0];// 同样ost中也会保存该OutputFilter.(建议画图容易理解)
 
-    /*3.开辟一个InputFilter *指针和开辟一个InputFilter结构体，
-     并让该指针指向该结构体，然后对该结构体进行相关赋值*/
+    /* 3.开辟一个InputFilter *指针和开辟一个InputFilter结构体，
+     并让该指针指向该结构体，然后对该结构体进行相关赋值 */
     GROW_ARRAY(fg->inputs, fg->nb_inputs);
     if (!(fg->inputs[0] = av_mallocz(sizeof(*fg->inputs[0]))))
         exit_program(1);
-    /*与输出过滤器赋值同理*/
+    /* 与输出过滤器赋值同理 */
     fg->inputs[0]->ist   = ist;
     fg->inputs[0]->graph = fg;
     fg->inputs[0]->format = -1;
-    /*给输入过滤器中的帧队列开辟内存，注意开辟的是指针大小的内存*/
-    fg->inputs[0]->frame_queue = av_fifo_alloc(8 * sizeof(AVFrame*));/*开辟内存，只不过是使用结构体AVFifoBuffer进行返回，
-                                                                        av_fifo_alloc源码很简单，可以看看*/
+    /* 给输入过滤器中的帧队列开辟内存，注意开辟的是指针大小的内存 */
+    fg->inputs[0]->frame_queue = av_fifo_alloc(8 * sizeof(AVFrame*));/* 开辟内存，只不过是使用结构体AVFifoBuffer进行返回，
+                                                                        av_fifo_alloc源码很简单，可以看看 */
     if (!fg->inputs[0]->frame_queue)
         exit_program(1);
 
     GROW_ARRAY(ist->filters, ist->nb_filters);// 给输入流的过滤器开辟一个指针
     ist->filters[ist->nb_filters - 1] = fg->inputs[0];// 给输入流的过滤器赋值，对比输出流OutputStream可以看到，输入流可以有多个输入过滤器
 
-    /*4.保存FilterGraph fg，其中该fg保存了新开辟的输出过滤器OutputFilter 以及 新开辟的输入过滤器InputFilter*/
+    /* 4.保存FilterGraph fg，其中该fg保存了新开辟的输出过滤器OutputFilter 以及 新开辟的输入过滤器InputFilter */
     GROW_ARRAY(filtergraphs, nb_filtergraphs);
     filtergraphs[nb_filtergraphs - 1] = fg;
 

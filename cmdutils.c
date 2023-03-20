@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Various utilities for command line tools
  * Copyright (c) 2000-2003 Fabrice Bellard
  *
@@ -1298,6 +1298,7 @@ static int warned_cfg = 0;
 
 static void print_all_libs_info(int flags, int level)
 {
+#if CONFIG_AVRESAMPLE
     PRINT_LIB_INFO(avutil,     AVUTIL,     flags, level);
     PRINT_LIB_INFO(avcodec,    AVCODEC,    flags, level);
     PRINT_LIB_INFO(avformat,   AVFORMAT,   flags, level);
@@ -1307,6 +1308,7 @@ static void print_all_libs_info(int flags, int level)
     PRINT_LIB_INFO(swscale,    SWSCALE,    flags, level);
     PRINT_LIB_INFO(swresample, SWRESAMPLE, flags, level);
     PRINT_LIB_INFO(postproc,   POSTPROC,   flags, level);
+#endif
 }
 
 static void print_program_info(int flags, int level)
@@ -2338,7 +2340,7 @@ AVDictionary *filter_codec_opts(AVDictionary *opts, enum AVCodecID codec_id,
             !codec ||   /*该编解码器存在*/
             (codec->priv_class &&
              av_opt_find(&codec->priv_class, t->key, NULL, flags,
-                         AV_OPT_SEARCH_FAKE_OBJ)))/*codec->priv_class存在且在codec->priv_class找到该key,codec->priv_class是称为cc的子AVClass？有兴趣请看源码*/
+                         AV_OPT_SEARCH_FAKE_OBJ)))/* codec->priv_class存在且在codec->priv_class找到该key,codec->priv_class是称为cc的子AVClass？有兴趣请看源码 */
             av_dict_set(&ret, t->key, t->value, 0);
         else if (t->key[0] == prefix &&
                  av_opt_find(&cc, t->key + 1, NULL, flags,

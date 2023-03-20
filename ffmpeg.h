@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This file is part of FFmpeg.
  *
  * FFmpeg is free software; you can redistribute it and/or
@@ -81,7 +81,7 @@ typedef struct HWAccel {
 typedef struct HWDevice {
     const char *name;
     enum AVHWDeviceType type;
-    AVBufferRef *device_ref;    /*硬件设备引用*/
+    AVBufferRef *device_ref;    /* 硬件设备引用 */
 } HWDevice;
 
 /* select an input stream for an output stream */

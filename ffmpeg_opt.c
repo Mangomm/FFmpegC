@@ -1,4 +1,4 @@
-
+﻿
 /*
  * ffmpeg option parsing
  *
@@ -1585,8 +1585,8 @@ static int choose_encoder(OptionsContext *o, AVFormatContext *s, OutputStream *o
 static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, enum AVMediaType type, int source_index)
 {
     OutputStream *ost;
-    /*1.创建新的输出流*/
-    AVStream *st = avformat_new_stream(oc, NULL);//这里调用后，oc->nb_streams自动加1.例如avformat_alloc_output_context2时是0，这里后变成1
+    /* 1.创建新的输出流 */
+    AVStream *st = avformat_new_stream(oc, NULL);// 这里调用后，oc->nb_streams自动加1.例如avformat_alloc_output_context2时是0，这里后变成1
     int idx      = oc->nb_streams - 1, ret = 0;
     const char *bsfs = NULL, *time_base = NULL;
     char *next, *codec_tag = NULL;
@@ -1601,19 +1601,19 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
     if (oc->nb_streams - 1 < o->nb_streamid_map)
         st->id = o->streamid_map[oc->nb_streams - 1];
 
-    GROW_ARRAY(output_streams, nb_output_streams);//在二级数组中添加一个一级指针大小的元素
+    GROW_ARRAY(output_streams, nb_output_streams);// 在二级数组中添加一个一级指针大小的元素
     if (!(ost = av_mallocz(sizeof(*ost))))
         exit_program(1);
     output_streams[nb_output_streams - 1] = ost;// 给一级指针赋值
 
-    /*2.给OutputStream相关成员赋值*/
-    ost->file_index = nb_output_files - 1;//这里有机会可以试试多个输出时，debug file_index的值
+    /* 2.给OutputStream相关成员赋值 */
+    ost->file_index = nb_output_files - 1;// 这里有机会可以试试多个输出时，debug file_index的值
     ost->index      = idx;// 使用流下标赋值
     ost->st         = st;
     ost->forced_kf_ref_pts = AV_NOPTS_VALUE;
     st->codecpar->codec_type = type;
 
-    /*3.寻找编码器*/
+    /* 3.寻找编码器 */
     ret = choose_encoder(o, oc, ost);
     if (ret < 0) {
         av_log(NULL, AV_LOG_FATAL, "Error selecting an encoder for stream "
@@ -1621,7 +1621,7 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
         exit_program(1);
     }
 
-    /*4.开辟编码器上下文*/
+    /* 4.开辟编码器上下文 */
     ost->enc_ctx = avcodec_alloc_context3(ost->enc);
     if (!ost->enc_ctx) {
         av_log(NULL, AV_LOG_ERROR, "Error allocating the encoding context.\n");
@@ -1629,22 +1629,22 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
     }
     ost->enc_ctx->codec_type = type;
 
-    /*5.给OutputStream中的编码器相关参数开辟空间*/
+    /* 5.给OutputStream中的编码器相关参数开辟空间 */
     ost->ref_par = avcodec_parameters_alloc();
     if (!ost->ref_par) {
         av_log(NULL, AV_LOG_ERROR, "Error allocating the encoding parameters.\n");
         exit_program(1);
     }
 
-    /*6.从o->g->codec_opts过滤选项，保存到OutputStream的encoder_opts中*/
+    /* 6.从o->g->codec_opts过滤选项，保存到OutputStream的encoder_opts中 */
     if (ost->enc) {
         AVIOContext *s = NULL;
         char *buf = NULL, *arg = NULL, *preset = NULL;
 
-        /*这里是将o中编码器选项转移到OutputStream中，很重要*/
+        /* 这里是将o中编码器选项转移到OutputStream中，很重要 */
         ost->encoder_opts  = filter_codec_opts(o->g->codec_opts, ost->enc->id, oc, st, ost->enc);
 
-        //该presets应该与选项-preset veryfast无关因为-preset是被存放在o->g->codec_opts中.故这里后续分析
+        // 该presets应该与选项-preset veryfast无关因为-preset是被存放在o->g->codec_opts中.故这里后续分析
         MATCH_PER_STREAM_OPT(presets, str, preset, oc, st);
         if (preset && (!(ret = get_preset_file_2(preset, ost->enc->name, &s)))) {
             do  {
@@ -1673,17 +1673,17 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
         ost->encoder_opts = filter_codec_opts(o->g->codec_opts, AV_CODEC_ID_NONE, oc, st, NULL);
     }
 
-    /*tyycode*/
+    /* tyycode */
     AVDictionaryEntry *t = NULL;
     while((t = av_dict_get(ost->encoder_opts, "", t, AV_DICT_IGNORE_SUFFIX))){
         printf("tyytest, t->key: %s, t->value: %s\n", t->key, t->value);
     }
 
-    /*7.这里到函数结尾都是给OutputStream相关成员赋值*/
+    /* 7.这里到函数结尾都是给OutputStream相关成员赋值 */
     if (o->bitexact)
         ost->enc_ctx->flags |= AV_CODEC_FLAG_BITEXACT;
 
-    /*是否设置流的时基，一般不设置默认是{0,0}*/
+    /* 是否设置流的时基，一般不设置默认是{0,0} */
     /**
      * av_parse_ratio: 解析str并将解析的比率存储在q中。请注意，无穷大(1/0)或负数的比率为被认为是有效的，
      * 想要排除这些值,所以你应该检查返回值。未定义的值可以使用“0:0”字符串表示。
@@ -1702,11 +1702,11 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
             av_log(NULL, AV_LOG_FATAL, "Invalid time base: %s\n", time_base);
             exit_program(1);
         }
-        /*AVStream结构体每个字段解释 see https://blog.csdn.net/weixin_44517656/article/details/109645489*/
+        /* AVStream结构体每个字段解释 see https://blog.csdn.net/weixin_44517656/article/details/109645489 */
         st->time_base = q;
     }
 
-    /*是否设置编码时的时基，一般不设置默认是{0,0}*/
+    /* 是否设置编码时的时基，一般不设置默认是{0,0} */
     MATCH_PER_STREAM_OPT(enc_time_bases, str, time_base, oc, st);
     if (time_base) {
         AVRational q;
@@ -1718,8 +1718,8 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
         ost->enc_timebase = q;
     }
 
-    /*-frames选项？暂时未遇到，不过应该与截图相关*/
-    //对应参数"frames"，"vframes"，设置输出的帧数。
+    /* -frames选项？暂时未遇到，不过应该与截图相关 */
+    // 对应参数"frames"，"vframes"，设置输出的帧数。
     ost->max_frames = INT64_MAX;
     MATCH_PER_STREAM_OPT(max_frames, i64, ost->max_frames, oc, st);
     for (i = 0; i<o->nb_max_frames; i++) {
@@ -1730,12 +1730,12 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
         }
     }
 
-    //对应参数"copypriorss"，"copy or discard frames before start time"
+    // 对应参数"copypriorss"，"copy or discard frames before start time"
     ost->copy_prior_start = -1;
     MATCH_PER_STREAM_OPT(copy_prior_start, i, ost->copy_prior_start, oc ,st);
 
-    //对应参数"bsf"，"absf"，"vbsf"
-    /*这里应该与转码+滤镜相关，后续详细分析，可简单参考https://www.cnblogs.com/zhibei/p/12551810.html*/
+    // 对应参数"bsf"，"absf"，"vbsf"
+    /* 这里应该与转码+滤镜相关，后续详细分析，可简单参考https://www.cnblogs.com/zhibei/p/12551810.html */
     MATCH_PER_STREAM_OPT(bitstream_filters, str, bsfs, oc, st);
     while (bsfs && *bsfs) {
         const AVBitStreamFilter *filter;
@@ -1787,7 +1787,7 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
             bsfs++;
     }
 
-    //对应参数"tag"
+    // 对应参数"tag"
     MATCH_PER_STREAM_OPT(codec_tags, str, codec_tag, oc, st);
     if (codec_tag) {
         uint32_t tag = strtol(codec_tag, &next, 0);
@@ -1797,15 +1797,15 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
         ost->enc_ctx->codec_tag = tag;
     }
 
-    //对应参数"qscale:[v:a:s:d]"/"q" 以<数值>质量为基础的VBR，取值0.01-255，越小质量越好
-    /*qscale、disposition、max_muxing_queue_size暂时未研究*/
+    // 对应参数"qscale:[v:a:s:d]"/"q" 以<数值>质量为基础的VBR，取值0.01-255，越小质量越好
+    /* qscale、disposition、max_muxing_queue_size暂时未研究 */
     MATCH_PER_STREAM_OPT(qscale, dbl, qscale, oc, st);
     if (qscale >= 0) {
         ost->enc_ctx->flags |= AV_CODEC_FLAG_QSCALE;
         ost->enc_ctx->global_quality = FF_QP2LAMBDA * qscale;
     }
 
-    //对应参数"disposition"
+    // 对应参数"disposition"
     MATCH_PER_STREAM_OPT(disposition, str, ost->disposition, oc, st);
     ost->disposition = av_strdup(ost->disposition);
 
@@ -1813,11 +1813,11 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
     MATCH_PER_STREAM_OPT(max_muxing_queue_size, i, ost->max_muxing_queue_size, oc, st);
     ost->max_muxing_queue_size *= sizeof(AVPacket);
 
-    /*编码器设置全局头，一般推rtmp都会默认设置*/
+    /* 编码器设置全局头，一般推rtmp都会默认设置 */
     if (oc->oformat->flags & AVFMT_GLOBALHEADER)
         ost->enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-    /*拷贝对应的字典到OutputStream，编解码器选项的字段在上面的filter_codec_opts处理了*/
+    /* 拷贝对应的字典到OutputStream，编解码器选项的字段在上面的filter_codec_opts处理了 */
     av_dict_copy(&ost->sws_dict, o->g->sws_dict, 0);
 
     av_dict_copy(&ost->swr_opts, o->g->swr_opts, 0);
@@ -1828,13 +1828,13 @@ static OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, e
 
     ost->source_index = source_index;// 输入文件对应的流下标.视频时，该流下标就是对应该文件中的视频流下标
     if (source_index >= 0) {
-        ost->sync_ist = input_streams[source_index];//要同步的输入流，这里看到，输出流中会有成员指向对应输入流的信息
+        ost->sync_ist = input_streams[source_index];// 要同步的输入流，这里看到，输出流中会有成员指向对应输入流的信息
         input_streams[source_index]->discard = 0;
         input_streams[source_index]->st->discard = input_streams[source_index]->user_set_discard;
     }
     ost->last_mux_dts = AV_NOPTS_VALUE;
 
-    /*给复用队列开辟内存*/
+    /* 给复用队列开辟内存 */
     ost->muxing_queue = av_fifo_alloc(8 * sizeof(AVPacket));
     if (!ost->muxing_queue)
         exit_program(1);

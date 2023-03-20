@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2000-2003 Fabrice Bellard
  *
  * This file is part of FFmpeg.
@@ -507,7 +507,7 @@ static void ffmpeg_cleanup(int ret)
 
         // 1.2 释放InputFilter数组
         for (j = 0; j < fg->nb_inputs; j++) {
-            while (av_fifo_size(fg->inputs[j]->frame_queue)) {//释放帧队列剩余的帧
+            while (av_fifo_size(fg->inputs[j]->frame_queue)) {// 释放帧队列剩余的帧
                 AVFrame *frame;
                 av_fifo_generic_read(fg->inputs[j]->frame_queue, &frame,
                                      sizeof(frame), NULL);
@@ -760,7 +760,7 @@ static void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int u
     /* 1. 统计已经写帧的数量. */
     // "视频需要编码"以外的类型，且unqueue=0表示该pkt没有计算时，会进行计算.
     if (!(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && ost->encoding_needed) && !unqueue) {
-        if (ost->frame_number >= ost->max_frames) {//帧数大于允许的最大帧数，不作处理，并将该包释放
+        if (ost->frame_number >= ost->max_frames) {// 帧数大于允许的最大帧数，不作处理，并将该包释放
             av_packet_unref(pkt);
             return;
         }
@@ -1010,7 +1010,7 @@ static void close_output_stream(OutputStream *ost)
  * therefore flush any delayed packets to the output.  A blank packet
  * must be supplied in this case.
  */
-/*(向输出发送单个包，应用与输出流相关的任何位流过滤器。这可能会导致实际写入任意数量的数据包，具体取决于应用了什么位流过滤器。
+/* (向输出发送单个包，应用与输出流相关的任何位流过滤器。这可能会导致实际写入任意数量的数据包，具体取决于应用了什么位流过滤器。
  * 当此函数返回时，所提供的包将被消耗，并且为空(就像新分配的一样)。
  * 如果设置了eof，则将eof指示为所有位流过滤器，因此将任何延迟的数据包刷新到输出。
  * 在这种情况下，必须提供一个空白包)*/
@@ -1505,7 +1505,7 @@ static void do_video_out(OutputFile *of,
         av_log(NULL, AV_LOG_VERBOSE, "*** %d dup!\n", nb_frames - 1);
         if (nb_frames_dup > dup_warning) {
             av_log(NULL, AV_LOG_WARNING, "More than %d frames duplicated\n", dup_warning);
-            dup_warning *= 10;//复制超过一定数量会提示，并且下一次提示是本次的10倍？
+            dup_warning *= 10;// 复制超过一定数量会提示，并且下一次提示是本次的10倍？
         }
     }
     ost->last_dropped = nb_frames == nb0_frames && next_picture;// 两者相等且帧存在,就认为被drop了
@@ -1603,7 +1603,7 @@ static void do_video_out(OutputFile *of,
             av_log(NULL, AV_LOG_DEBUG, "Forced keyframe at time %f\n", pts_time);
         }
 
-        update_benchmark(NULL);//没有指定选项-benchmark_all，可忽略
+        update_benchmark(NULL);// 没有指定选项-benchmark_all，可忽略
         if (debug_ts) {
             av_log(NULL, AV_LOG_INFO, "encoder <- type:video "
                    "frame_pts:%s frame_pts_time:%s time_base:%d/%d\n",
@@ -1628,7 +1628,7 @@ static void do_video_out(OutputFile *of,
             ret = avcodec_receive_packet(enc, &pkt);
             update_benchmark("encode_video %d.%d", ost->file_index, ost->index);
             if (ret == AVERROR(EAGAIN))
-                break;//一般每次读完一个pkt会从这里退出while
+                break;// 一般每次读完一个pkt会从这里退出while
             if (ret < 0)
                 goto error;
 
@@ -4569,6 +4569,8 @@ static int init_output_stream_encode(OutputStream *ost)
     return 0;
 }
 
+#ifdef _MSC_VER
+#else
 //tyycode 用于测试av_add_q()等函数
 #if 1
 #if HAVE_FAST_CLZ
@@ -4657,6 +4659,8 @@ int av_reduce(int *dst_num, int *dst_den,
 
     return den == 0;
 }
+#endif
+#endif
 
 /**
  * @brief 两个有理数相加.
@@ -4671,7 +4675,6 @@ AVRational av_add_q(AVRational b, AVRational c) {
     av_reduce(&b.num, &b.den, tyycodeNum, tyycodeDen, INT_MAX);
     return b;
 }
-#endif
 
 /**
  * @brief 初始化输出流，流程分为初始化分转码和不转码。
