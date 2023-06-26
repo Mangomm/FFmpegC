@@ -22,15 +22,13 @@
 
 #include "ffmpeg.h"
 
-static int nb_hw_devices;           // 用户电脑支持的硬件设备数
-static HWDevice **hw_devices;       // 用户电脑支持的硬件设备数组
+static int nb_hw_devices;           // hw_devices数组大小
+static HWDevice **hw_devices;       // 用户添加-init_hw_device选项才不是空，否则一直是空
 
-/// 该函数的注解可能不太准确，不过意思是这样，因为笔者还没详细debug硬件相关的代码
 /**
- * @brief 从用户支持的硬件设备列表中，获取指定的硬件设备。
+ * @brief 根据设备类型 获取 用户注册的设备
  * @param type 指定硬件设备的类型
  * @return 找到该类型的设备，则返回硬件设备；否则返回NULL。
- * @note nb_hw_devices是用户支持的硬件设备数，为0说明不支持，直接返回NULL
 */
 static HWDevice *hw_device_get_by_type(enum AVHWDeviceType type)
 {
@@ -46,7 +44,11 @@ static HWDevice *hw_device_get_by_type(enum AVHWDeviceType type)
     return found;
 }
 
-//与hw_device_get_by_type同理
+/**
+ * @brief 根据设备名 获取 用户注册的设备
+ * @param name 指定硬件设备的名字
+ * @return 找到该名字的设备，则返回硬件设备；否则返回NULL。
+*/
 HWDevice *hw_device_get_by_name(const char *name)
 {
     int i;
@@ -290,7 +292,7 @@ void hw_device_free_all(void)
 }
 
 /**
- * @brief 通过编解码器匹配硬件设备。
+ * @brief  通过类型获取用户自定义的硬件设备.不加-init_hw_device选项注册，dev都是返回空。
  * @param codec 编解码器
  * @return 找到返回对应的硬件设备；找不到返回NULL
 */
@@ -315,7 +317,8 @@ static HWDevice *hw_device_match_by_codec(const AVCodec *codec)
         if (!(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
             continue;
 
-        //通过类型获取硬件设备.注意，该函数就是源码函数，在本文件中可以找到.
+        // 通过类型获取用户自定义的硬件设备.不加-init_hw_device选项注册，dev都是返回空
+        // 注意，该函数是自定义函数，在本文件中可以找到.
         dev = hw_device_get_by_type(config->device_type);
         if (dev)
             return dev;
@@ -323,7 +326,8 @@ static HWDevice *hw_device_match_by_codec(const AVCodec *codec)
 }
 
 /**
- * @brief 后续再详细分析
+ * @brief 找HWDevice类型的设备，并保存在ist->dec_ctx->hw_device_ctx。
+ * @return 找不找到返回0；出现错误返回负数
 */
 int hw_device_setup_for_decode(InputStream *ist)
 {
@@ -332,12 +336,21 @@ int hw_device_setup_for_decode(InputStream *ist)
     HWDevice *dev = NULL;
     int err, auto_device = 0;
 
-    if (ist->hwaccel_device) {
-        dev = hw_device_get_by_name(ist->hwaccel_device);
+    // 1. 若设置了-hwaccel_device选项，则根据选项名查找dev；
+    //  1.1 找不到dev：再根据ist->hwaccel_id查找；
+    //         1）ist->hwaccel_id == HWACCEL_AUTO：待会自动选择；
+    //         2）ist->hwaccel_id == HWACCEL_GENERIC：根据设备类型初始化；
+    //  1.2 找到dev：
+    //         1）ist->hwaccel_id == HWACCEL_AUTO：保存硬件设备类型；
+    //         2）OptionsContext.hwaccels(-hwaccel选项)对应的硬件设备类型 与 -hwaccel_device选项对应的设备类型不一致：返回错误号；
+    if (ist->hwaccel_device) {// 设置了-hwaccel_device选项
+        dev = hw_device_get_by_name(ist->hwaccel_device);// 没指定-init_hw_device选项都是返回空
         if (!dev) {
             if (ist->hwaccel_id == HWACCEL_AUTO) {
+                // 待会自动选择
                 auto_device = 1;
             } else if (ist->hwaccel_id == HWACCEL_GENERIC) {
+                // 根据设备类型初始化
                 type = ist->hwaccel_device_type;
                 err = hw_device_init_from_type(type, ist->hwaccel_device,
                                                &dev);
@@ -348,8 +361,9 @@ int hw_device_setup_for_decode(InputStream *ist)
             }
         } else {
             if (ist->hwaccel_id == HWACCEL_AUTO) {
+                // 保存硬件设备类型
                 ist->hwaccel_device_type = dev->type;
-            } else if (ist->hwaccel_device_type != dev->type) {
+            } else if (ist->hwaccel_device_type != dev->type) {// OptionsContext.hwaccels(-hwaccel选项)对应的硬件设备类型 与 -hwaccel_device选项对应的设备类型不一致
                 av_log(ist->dec_ctx, AV_LOG_ERROR, "Invalid hwaccel device "
                        "specified for decoder: device %s of type %s is not "
                        "usable with hwaccel %s.\n", dev->name,
@@ -359,6 +373,12 @@ int hw_device_setup_for_decode(InputStream *ist)
             }
         }
     } else {
+        /*
+         * 2 没有设置了-hwaccel_device选项。
+         *      2.1）ist->hwaccel_id == HWACCEL_AUTO：待会自动选择。
+         *      2.2）ist->hwaccel_id == HWACCEL_GENERIC：根据设备类型获取(hw_device_get_by_type())或者初始化(hw_device_init_from_type())；
+         *      2.3）其它：通过类型获取用户自定义的硬件设备。不加-init_hw_device选项注册，dev都是返回空。
+         */
         if (ist->hwaccel_id == HWACCEL_AUTO) {
             auto_device = 1;
         } else if (ist->hwaccel_id == HWACCEL_GENERIC) {
@@ -367,7 +387,8 @@ int hw_device_setup_for_decode(InputStream *ist)
             if (!dev)
                 err = hw_device_init_from_type(type, NULL, &dev);
         } else {
-            /*推流一般走这里，例如1.mkv的推流命令dev返回是空*/
+            // 通过类型获取用户自定义的硬件设备。不加-init_hw_device选项注册，dev都是返回空
+            /* 推流一般走这里，例如1.mkv的推流命令dev返回是空 */
             dev = hw_device_match_by_codec(ist->dec);
             if (!dev) {
                 // No device for this codec, but not using generic hwaccel
@@ -378,12 +399,15 @@ int hw_device_setup_for_decode(InputStream *ist)
         }
     }
 
+    // 3 自动查找dev
     if (auto_device) {
         int i;
+        // 3.1 没有支持的硬解设备直接返回0
         if (!avcodec_get_hw_config(ist->dec, 0)) {
             // Decoder does not support any hardware devices.
             return 0;
         }
+        // 3.2 根据设备类型获取(hw_device_get_by_type())
         for (i = 0; !dev; i++) {
             config = avcodec_get_hw_config(ist->dec, i);
             if (!config)
@@ -396,6 +420,7 @@ int hw_device_setup_for_decode(InputStream *ist)
                        av_hwdevice_get_type_name(type), dev->name);
             }
         }
+        // 3.3 若还找不到，通过设备类型初始化(hw_device_init_from_type())
         for (i = 0; !dev; i++) {
             config = avcodec_get_hw_config(ist->dec, i);
             if (!config)
@@ -429,6 +454,7 @@ int hw_device_setup_for_decode(InputStream *ist)
         }
     }
 
+    // 4 来到这里还是空则返回错误
     if (!dev) {
         av_log(ist->dec_ctx, AV_LOG_ERROR, "No device available "
                "for decoder: device type %s needed for codec %s.\n",
@@ -436,6 +462,7 @@ int hw_device_setup_for_decode(InputStream *ist)
         return err;
     }
 
+    // 5 对dev->device_ref添加引用计数，保存在ist->dec_ctx->hw_device_ctx
     ist->dec_ctx->hw_device_ctx = av_buffer_ref(dev->device_ref);
     if (!ist->dec_ctx->hw_device_ctx)
         return AVERROR(ENOMEM);
@@ -516,6 +543,9 @@ fail:
     return err;
 }
 
+/**
+ * @brief 硬件检索数据回调初始化
+ */
 int hwaccel_decode_init(AVCodecContext *avctx)
 {
     InputStream *ist = avctx->opaque;

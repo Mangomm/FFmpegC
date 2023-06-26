@@ -1,0 +1,14 @@
+prefix=/home/ffmpegBuild/build/ffmepg-4.2-hw
+exec_prefix=${prefix}
+libdir=/home/ffmpegBuild/build/ffmepg-4.2-hw/lib
+includedir=/home/ffmpegBuild/build/ffmepg-4.2-hw/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 56.31.100
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil 
+Libs.private: user32.lib bcrypt.lib
+Cflags: -I${includedir}

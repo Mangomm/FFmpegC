@@ -3631,39 +3631,57 @@ fail:
     av_freep(&avc);
 }
 
+/**
+ * @brief ffmpeg回调，返回ffmpeg硬解输出的像素格式
+ */
 static enum AVPixelFormat get_format(AVCodecContext *s, const enum AVPixelFormat *pix_fmts)
 {
     InputStream *ist = s->opaque;
     const enum AVPixelFormat *p;
     int ret;
 
+    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++){
+        printf("p: %d\n", *p);
+    }
+
+    // 1. 首先for遍历编解码器支持的像素格式
     for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
         const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(*p);
         const AVCodecHWConfig  *config = NULL;
         int i;
 
+        // 1.1 如果像素格式不属于硬件加速像素格式，break
         if (!(desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
             break;
 
+        // 1.2 判断硬件解码器配置的像素格式 是否被 解码器支持.
+        // 个人目前认为avcodec_get_hw_config返回的config是硬件本身支持的像素格式；
+        // 而get_format回调的参数pix_fmts是ffmpeg解码器支持的像素格式.
         if (ist->hwaccel_id == HWACCEL_GENERIC ||
             ist->hwaccel_id == HWACCEL_AUTO) {
             for (i = 0;; i++) {
+                // avcodec_get_hw_config: 从AVCodec获取对应硬件编码器的配置以取得hw_pix_fmt.
                 config = avcodec_get_hw_config(s->codec, i);
                 if (!config)
                     break;
                 if (!(config->methods &
                       AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
                     continue;
-                if (config->pix_fmt == *p)
+                if (config->pix_fmt == *p)// 判断是否被支持
                     break;
             }
         }
+
+        // 由于上面for是死循环，退出for只有两种可能：1）找不到硬件配置(config为空)；2）找到硬件配置(config非空)
+
+        // 1.3 找到硬件配置，初始化hwaccel_retrieve_data为接收数据回调
         if (config) {
             if (config->device_type != ist->hwaccel_device_type) {
                 // Different hwaccel offered, ignore.
                 continue;
             }
 
+            // 初始化hwaccel_retrieve_data为接收数据回调
             ret = hwaccel_decode_init(s);
             if (ret < 0) {
                 if (ist->hwaccel_id == HWACCEL_GENERIC) {
@@ -3676,7 +3694,7 @@ static enum AVPixelFormat get_format(AVCodecContext *s, const enum AVPixelFormat
                 }
                 continue;
             }
-        } else {
+        } else {// 1.4 找不到硬件配置，调用hwaccels数组设置好的初始化函数.英伟达对应的是cuvid_init()
             const HWAccel *hwaccel = NULL;
             int i;
             for (i = 0; hwaccels[i].name; i++) {
@@ -3694,6 +3712,7 @@ static enum AVPixelFormat get_format(AVCodecContext *s, const enum AVPixelFormat
                 continue;
             }
 
+            // 调用hwaccels数组设置好的初始化函数
             ret = hwaccel->init(s);
             if (ret < 0) {
                 av_log(NULL, AV_LOG_FATAL,
@@ -3704,16 +3723,19 @@ static enum AVPixelFormat get_format(AVCodecContext *s, const enum AVPixelFormat
             }
         }
 
+        // 1.5 如果存在ist->hw_frames_ctx，添加引用到解码器
         if (ist->hw_frames_ctx) {
             s->hw_frames_ctx = av_buffer_ref(ist->hw_frames_ctx);
             if (!s->hw_frames_ctx)
                 return AV_PIX_FMT_NONE;
         }
 
+        // 1.6 保存像素格式到ist
         ist->hwaccel_pix_fmt = *p;
         break;
-    }
+    }// <== for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) end ==>
 
+    // 2 返回目标格式
     return *p;
 }
 
@@ -3721,9 +3743,11 @@ static int get_buffer(AVCodecContext *s, AVFrame *frame, int flags)
 {
     InputStream *ist = s->opaque;
 
+    // 优先调用自己设置的回调
     if (ist->hwaccel_get_buffer && frame->format == ist->hwaccel_pix_fmt)
         return ist->hwaccel_get_buffer(s, frame, flags);
 
+    // 没有设置回调，则调用默认回调
     return avcodec_default_get_buffer2(s, frame, flags);
 }
 
@@ -4739,13 +4763,14 @@ static int init_output_stream(OutputStream *ost, char *error, int error_len)
             !av_dict_get(ost->encoder_opts, "ab", NULL, 0))
             av_dict_set(&ost->encoder_opts, "b", "128000", 0);
 
-        /* 1.5若AVHWFramesContext中的像素格式与av_buffersink_get_format获取的像素格式一样，
+        /* 1.5 若AVHWFramesContext中的像素格式与av_buffersink_get_format获取的像素格式一样，
          * 则对av_buffersink_get_hw_frames_ctx得到的AVHWFramesContext引用数加1,
-         * 否则调用hw_device_setup_for_encode，对dev->device_ref引用数加1 */
+         * 否则调用hw_device_setup_for_encode处理 */
         //简单来说，这里就是设置enc_ctx->hw_frames_ctx或者enc_ctx->hw_device_ctx
         if (ost->filter && av_buffersink_get_hw_frames_ctx(ost->filter->filter) &&
             ((AVHWFramesContext*)av_buffersink_get_hw_frames_ctx(ost->filter->filter)->data)->format ==
             av_buffersink_get_format(ost->filter->filter)) {
+            printf("enc hw fmt: %d\n", av_buffersink_get_format(ost->filter->filter));
             /*
              * ost->enc_ctx->hw_frames_ctx的注释：
              * 对AVHWFramesContext的引用，描述了输入(编码)或输出(解码)帧。引用由调用者设置，

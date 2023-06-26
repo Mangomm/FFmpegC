@@ -56,16 +56,16 @@
 #define MAX_STREAMS 1024    /* arbitrary sanity check value */
 
 #define mydebug av_log
-#define TYYCODE_TIMESTAMP_DEMUXER   // 用于debug解复用的时间戳
-#define TYYCODE_TIMESTAMP_DECODE
-#define TYYCODE_TIMESTAMP_ENCODER
-#define TYYCODE_TIMESTAMP_MUXER
+//#define TYYCODE_TIMESTAMP_DEMUXER   // 用于debug解复用的时间戳
+//#define TYYCODE_TIMESTAMP_DECODE
+//#define TYYCODE_TIMESTAMP_ENCODER
+//#define TYYCODE_TIMESTAMP_MUXER
 
 
 enum HWAccelID {
     HWACCEL_NONE = 0,
-    HWACCEL_AUTO,
-    HWACCEL_GENERIC,
+    HWACCEL_AUTO,// 自动选择
+    HWACCEL_GENERIC,// 选择通用的
     HWACCEL_VIDEOTOOLBOX,
     HWACCEL_QSV,
     HWACCEL_CUVID,
@@ -132,9 +132,9 @@ typedef struct OptionsContext {
     int        nb_ts_scale;
     SpecifierOpt *dump_attachment;
     int        nb_dump_attachment;
-    SpecifierOpt *hwaccels;
+    SpecifierOpt *hwaccels;                     // -hwaccel选项
     int        nb_hwaccels;
-    SpecifierOpt *hwaccel_devices;
+    SpecifierOpt *hwaccel_devices;              // -hwaccel_device选项，是否指定硬件加速设备
     int        nb_hwaccel_devices;
     SpecifierOpt *hwaccel_output_formats;
     int        nb_hwaccel_output_formats;
@@ -391,15 +391,15 @@ typedef struct InputStream {
 
     /* hwaccel options */
     enum HWAccelID hwaccel_id;                  // 硬件解码器id
-    enum AVHWDeviceType hwaccel_device_type;    // 硬件设备类型
-    char  *hwaccel_device;
+    enum AVHWDeviceType hwaccel_device_type;    // 硬件设备类型，由hwaccel_id决定，hwaccel_id由OptionsContext.hwaccels(-hwaccel选项)决定
+    char  *hwaccel_device;                      // -hwaccel_device选项
     enum AVPixelFormat hwaccel_output_format;
 
     /* hwaccel context */
     void  *hwaccel_ctx;
     void (*hwaccel_uninit)(AVCodecContext *s);
-    int  (*hwaccel_get_buffer)(AVCodecContext *s, AVFrame *frame, int flags);
-    int  (*hwaccel_retrieve_data)(AVCodecContext *s, AVFrame *frame);//硬件检索数据回调
+    int  (*hwaccel_get_buffer)(AVCodecContext *s, AVFrame *frame, int flags);// 自定义获取buffer回调
+    int  (*hwaccel_retrieve_data)(AVCodecContext *s, AVFrame *frame);// 硬件检索数据回调，主要工作是硬解得到输出帧后，利用该函数进行处理
     enum AVPixelFormat hwaccel_pix_fmt;
     enum AVPixelFormat hwaccel_retrieved_pix_fmt;//硬件检索像素格式
     AVBufferRef *hw_frames_ctx;

@@ -527,6 +527,7 @@ static int opt_vaapi_device(void *optctx, const char *opt, const char *arg)
 }
 #endif
 
+// -init_hw_device选项的回调
 static int opt_init_hw_device(void *optctx, const char *opt, const char *arg)
 {
     if (!strcmp(arg, "list")) {
@@ -907,7 +908,6 @@ static void  add_input_streams(OptionsContext *o, AVFormatContext *ic)
 
             // 硬件加速相关.
             // 寻找硬件设备的id
-            // 可参考https://blog.csdn.net/u012117034/article/details/123470108
             MATCH_PER_STREAM_OPT(hwaccels, str, hwaccel, ic, st);
             if (hwaccel) {
                 // The NVDEC hwaccels use a CUDA device, so remap the name here.
@@ -964,7 +964,7 @@ static void  add_input_streams(OptionsContext *o, AVFormatContext *ic)
                 }
             }//<== if (hwaccel) end ==>
 
-            // 保存硬件设备名？
+            // 从命令行的参数获取硬件设备名
             MATCH_PER_STREAM_OPT(hwaccel_devices, str, hwaccel_device, ic, st);
             if (hwaccel_device) {
                 ist->hwaccel_device = av_strdup(hwaccel_device);
